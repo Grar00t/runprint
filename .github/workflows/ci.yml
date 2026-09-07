@@ -21,19 +21,21 @@ jobs:
           sudo apt-get install -y strace
 
       - name: Format
-        run: cargo fmt --all -- --check
+        run: bash .github/ci-annotate.sh "cargo fmt --check" cargo fmt --all -- --check
 
       - name: Check
-        run: cargo check --workspace
+        if: ${{ !cancelled() }}
+        run: bash .github/ci-annotate.sh "cargo check" cargo check --workspace
 
       - name: Test
-        run: cargo test --workspace
+        if: ${{ !cancelled() }}
+        run: bash .github/ci-annotate.sh "cargo test" cargo test --workspace
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --workspace --release
 
       - name: Cargo determinism matrix
         run: bash tests/cargo_determinism_matrix.sh ./target/release/runprint
