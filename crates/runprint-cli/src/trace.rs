@@ -825,6 +825,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_openat2_fdcwd_read() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"openat2(AT_FDCWD</project>, "read.txt", {flags=O_RDONLY, resolve=0}, 24) = 3</project/read.txt>"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::FileRead {
+            path: "$PROJECT/read.txt".to_string(),
+        }));
+    }
+
+    #[test]
+    fn parses_openat2_directory_fd_write() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"openat2(3</project/sub>, "write.txt", {flags=O_WRONLY|O_CREAT|O_TRUNC, mode=0644, resolve=0}, 24) = 4</project/sub/write.txt>"#,
+            Path::new("/ignored"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::FileWrite {
+            path: "$PROJECT/sub/write.txt".to_string(),
+        }));
+    }
+
+    #[test]
     fn parses_execveat_directory_fd() {
         let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
 
