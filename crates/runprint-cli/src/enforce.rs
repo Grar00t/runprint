@@ -13,7 +13,13 @@ use std::{
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct EnforcePolicy {
+    /// Broad filesystem mutation permission.
+    /// Includes modify, create, remove, link, rename/refer, and truncate.
     pub write: Vec<String>,
+
+    /// Narrow permission for modifying existing regular files only.
+    /// Does not allow creating or deleting filesystem entries.
+    pub modify: Vec<String>,
 }
 
 pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
@@ -23,7 +29,7 @@ pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
 
     let project_root = env::current_dir().context("failed to determine current directory")?;
 
-    apply_write_policy(policy, &project_root)?;
+    apply_filesystem_policy(policy, &project_root)?;
 
     let status = Command::new(&command[0])
         .args(&command[1..])
@@ -33,12 +39,13 @@ pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
     Ok(status.code().unwrap_or(128))
 }
 
-fn apply_write_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
+fn apply_filesystem_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
     let mut ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(write_access())?
         .create()?;
 
+    // Backward-compatible broad mutation roots.
     for pattern in &policy.write {
         let (path, recursive) = resolve_write_rule(pattern, project_root)?;
 
@@ -48,14 +55,14 @@ fn apply_write_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()>
             file_write_access()
         };
 
-        let fd = PathFd::new(&path).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to open enforcement path {}: {error}",
-                path.display()
-            )
-        })?;
+        ruleset = add_path_rule(ruleset, &path, access)?;
+    }
 
-        ruleset = ruleset.add_rule(PathBeneath::new(fd, access))?;
+    // Narrow existing-file modification roots.
+    for pattern in &policy.modify {
+        let (path, _) = resolve_write_rule(pattern, project_root)?;
+
+        ruleset = add_path_rule(ruleset, &path, file_write_access())?;
     }
 
     let status = ruleset.restrict_self()?;
@@ -69,6 +76,21 @@ fn apply_write_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()>
     }
 
     Ok(())
+}
+
+fn add_path_rule(
+    ruleset: landlock::RulesetCreated,
+    path: &Path,
+    access: BitFlags<AccessFs>,
+) -> Result<landlock::RulesetCreated> {
+    let fd = PathFd::new(path).map_err(|error| {
+        anyhow::anyhow!(
+            "failed to open enforcement path {}: {error}",
+            path.display()
+        )
+    })?;
+
+    Ok(ruleset.add_rule(PathBeneath::new(fd, access))?)
 }
 
 fn write_access() -> BitFlags<AccessFs> {
