@@ -845,6 +845,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_execveat_empty_path_from_fd() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"execveat(3</project/target>, "", ["target"], 0x0, AT_EMPTY_PATH) = 0"#,
+            Path::new("/ignored"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::Exec {
+            path: "$PROJECT/target".to_string(),
+        }));
+    }
+
+    #[test]
     fn parses_execveat_fdcwd() {
         let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
 
