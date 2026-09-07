@@ -1,3 +1,4 @@
+use crate::status::shell_exit_code;
 use anyhow::{bail, Context, Result};
 use landlock::{
     make_bitflags, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath,
@@ -51,7 +52,7 @@ pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
         .status()
         .with_context(|| format!("failed to execute {}", command[0]))?;
 
-    Ok(status.code().unwrap_or(128))
+    Ok(shell_exit_code(&status))
 }
 
 fn apply_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {

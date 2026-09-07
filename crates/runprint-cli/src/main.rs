@@ -1,4 +1,5 @@
 mod enforce;
+mod status;
 mod trace;
 
 use anyhow::Result;

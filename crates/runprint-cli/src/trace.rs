@@ -1,3 +1,4 @@
+use crate::status::shell_exit_code;
 use anyhow::{bail, Context, Result};
 use runprint_core::{Behavior, BehaviorLock, NormalizeContext};
 use std::{
@@ -44,7 +45,7 @@ pub fn record(command: &[String], include_system: bool) -> Result<RecordedRun> {
         .status()
         .context("failed to execute strace; is strace installed?")?;
 
-    let exit_code = status.code().unwrap_or(128);
+    let exit_code = shell_exit_code(&status);
 
     let lock = parse_trace_dir(
         dir.path(),
