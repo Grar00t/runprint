@@ -394,7 +394,12 @@ fn parse_behavior_line(
             let to = resolve_path(cwd, &to).to_string_lossy().into_owned();
 
             lock.insert_normalized(
-                Behavior::HardlinkCreate { from, to },
+                Behavior::HardlinkCreate {
+                    from,
+                    to,
+                    follow_symlink: false,
+                    empty_path: false,
+                },
                 include_system,
                 context,
             );
@@ -432,6 +437,8 @@ fn parse_behavior_line(
                 Behavior::HardlinkCreate {
                     from: from.to_string_lossy().into_owned(),
                     to: to.to_string_lossy().into_owned(),
+                    follow_symlink: linkat_has_flag(line, "AT_SYMLINK_FOLLOW"),
+                    empty_path: linkat_has_flag(line, "AT_EMPTY_PATH"),
                 },
                 include_system,
                 context,
@@ -475,6 +482,29 @@ fn insert_file_behavior(
 
 fn renameat2_has_flag(line: &str, wanted: &str) -> bool {
     if !line.starts_with("renameat2(") {
+        return false;
+    }
+
+    let Some(second_end) = quoted_end(line, 1) else {
+        return false;
+    };
+
+    let after = line[second_end + 1..].trim_start();
+
+    let Some(after) = after.strip_prefix(',') else {
+        return false;
+    };
+
+    let flags = after
+        .split_once(')')
+        .map(|(flags, _)| flags.trim())
+        .unwrap_or_else(|| after.trim());
+
+    flags.split('|').map(str::trim).any(|flag| flag == wanted)
+}
+
+fn linkat_has_flag(line: &str, wanted: &str) -> bool {
+    if !line.starts_with("linkat(") {
         return false;
     }
 
@@ -874,6 +904,75 @@ mod tests {
             nth_quoted_string(line, 0).as_deref(),
             Some(r"odd\qname.txt")
         );
+    }
+
+    #[test]
+    fn parses_linkat_symlink_follow_semantics() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"linkat(AT_FDCWD</project>, "source-link", AT_FDCWD</project>, "out", AT_SYMLINK_FOLLOW) = 0"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
+            from: "$PROJECT/source-link".into(),
+            to: "$PROJECT/out".into(),
+            follow_symlink: true,
+            empty_path: false,
+        }));
+    }
+
+    #[test]
+    fn parses_linkat_empty_path_semantics() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"linkat(3</project/source.txt>, "", AT_FDCWD</project>, "out.txt", AT_EMPTY_PATH) = 0"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
+            from: "$PROJECT/source.txt".into(),
+            to: "$PROJECT/out.txt".into(),
+            follow_symlink: false,
+            empty_path: true,
+        }));
+    }
+
+    #[test]
+    fn linkat_path_named_flag_does_not_impersonate_flag() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"linkat(AT_FDCWD</project>, "AT_SYMLINK_FOLLOW", AT_FDCWD</project>, "out", 0) = 0"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
+            from: "$PROJECT/AT_SYMLINK_FOLLOW".into(),
+            to: "$PROJECT/out".into(),
+            follow_symlink: false,
+            empty_path: false,
+        }));
     }
 
     #[test]

@@ -328,8 +328,27 @@ fn render(item: &Behavior) -> String {
         Behavior::SymlinkCreate { target, link } => {
             format!("symlink  {link} -> {target}")
         }
-        Behavior::HardlinkCreate { from, to } => {
-            format!("hardlink {from} -> {to}")
+        Behavior::HardlinkCreate {
+            from,
+            to,
+            follow_symlink,
+            empty_path,
+        } => {
+            let mut flags = Vec::new();
+
+            if *follow_symlink {
+                flags.push("AT_SYMLINK_FOLLOW");
+            }
+
+            if *empty_path {
+                flags.push("AT_EMPTY_PATH");
+            }
+
+            if flags.is_empty() {
+                format!("hardlink {from} -> {to}")
+            } else {
+                format!("hardlink {from} -> {to} [{}]", flags.join("|"))
+            }
         }
         Behavior::NetworkConnect { address } => format!("connect  {address}"),
         Behavior::UnixConnect { path } => format!("ipc      {path}"),
@@ -370,7 +389,7 @@ mod config_tests {
     }
 
     #[test]
-    fn lock_loader_accepts_current_v3() {
+    fn lock_loader_accepts_legacy_v3() {
         let raw = br#"{
             "version": 3,
             "behaviors": [
@@ -390,9 +409,34 @@ mod config_tests {
     }
 
     #[test]
-    fn lock_loader_rejects_future_version_before_behavior_decode() {
+    fn lock_loader_accepts_current_v4() {
         let raw = br#"{
             "version": 4,
+            "behaviors": [
+                {
+                    "kind": "hardlink_create",
+                    "from": "$PROJECT/source-link",
+                    "to": "$PROJECT/out",
+                    "follow_symlink": true
+                }
+            ]
+        }"#;
+
+        let lock = parse_lock(raw).unwrap();
+
+        assert_eq!(lock.version, 4);
+        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
+            from: "$PROJECT/source-link".into(),
+            to: "$PROJECT/out".into(),
+            follow_symlink: true,
+            empty_path: false,
+        }));
+    }
+
+    #[test]
+    fn lock_loader_rejects_future_version_before_behavior_decode() {
+        let raw = br#"{
+            "version": 5,
             "behaviors": [
                 {
                     "kind": "future_behavior_that_this_binary_does_not_know",
@@ -403,7 +447,7 @@ mod config_tests {
 
         let error = parse_lock(raw).unwrap_err();
 
-        assert_eq!(error.to_string(), "unsupported behavior lock version 4");
+        assert_eq!(error.to_string(), "unsupported behavior lock version 5");
     }
 
     #[test]

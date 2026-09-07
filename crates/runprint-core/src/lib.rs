@@ -7,24 +7,62 @@ use std::{
 };
 
 pub const BEHAVIOR_LOCK_MIN_SUPPORTED_VERSION: u32 = 1;
-pub const BEHAVIOR_LOCK_CURRENT_VERSION: u32 = 3;
+pub const BEHAVIOR_LOCK_CURRENT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Behavior {
-    Exec { path: String },
-    FileRead { path: String },
-    FileWrite { path: String },
-    FileDelete { path: String },
-    FileRename { from: String, to: String },
-    RenameExchange { left: String, right: String },
-    DirectoryCreate { path: String },
-    DirectoryDelete { path: String },
-    SymlinkCreate { target: String, link: String },
-    HardlinkCreate { from: String, to: String },
-    NetworkConnect { address: String },
-    UnixConnect { path: String },
-    UnixAbstractConnect { address: String },
+    Exec {
+        path: String,
+    },
+    FileRead {
+        path: String,
+    },
+    FileWrite {
+        path: String,
+    },
+    FileDelete {
+        path: String,
+    },
+    FileRename {
+        from: String,
+        to: String,
+    },
+    RenameExchange {
+        left: String,
+        right: String,
+    },
+    DirectoryCreate {
+        path: String,
+    },
+    DirectoryDelete {
+        path: String,
+    },
+    SymlinkCreate {
+        target: String,
+        link: String,
+    },
+    HardlinkCreate {
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        follow_symlink: bool,
+        #[serde(default, skip_serializing_if = "is_false")]
+        empty_path: bool,
+    },
+    NetworkConnect {
+        address: String,
+    },
+    UnixConnect {
+        path: String,
+    },
+    UnixAbstractConnect {
+        address: String,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone)]
@@ -219,9 +257,16 @@ pub fn normalize_behavior(
             link: normalize_runtime_path(&link, context),
         }),
 
-        Behavior::HardlinkCreate { from, to } => Some(Behavior::HardlinkCreate {
+        Behavior::HardlinkCreate {
+            from,
+            to,
+            follow_symlink,
+            empty_path,
+        } => Some(Behavior::HardlinkCreate {
             from: normalize_runtime_path(&from, context),
             to: normalize_runtime_path(&to, context),
+            follow_symlink,
+            empty_path,
         }),
 
         Behavior::Exec { path } => Some(Behavior::Exec {
@@ -379,7 +424,8 @@ mod tests {
         assert!(BehaviorLock::is_supported_version(1));
         assert!(BehaviorLock::is_supported_version(2));
         assert!(BehaviorLock::is_supported_version(3));
-        assert!(!BehaviorLock::is_supported_version(4));
+        assert!(BehaviorLock::is_supported_version(4));
+        assert!(!BehaviorLock::is_supported_version(5));
     }
 
     #[test]
@@ -494,6 +540,26 @@ mod tests {
             Some(Behavior::RenameExchange {
                 left: "$PROJECT/a.txt".into(),
                 right: "$PROJECT/z.txt".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn hardlink_modifiers_survive_path_normalization() {
+        let behavior = Behavior::HardlinkCreate {
+            from: "/home/test/project/source-link".into(),
+            to: "/home/test/project/out".into(),
+            follow_symlink: true,
+            empty_path: false,
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::HardlinkCreate {
+                from: "$PROJECT/source-link".into(),
+                to: "$PROJECT/out".into(),
+                follow_symlink: true,
+                empty_path: false,
             })
         );
     }

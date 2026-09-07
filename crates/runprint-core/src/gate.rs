@@ -129,7 +129,7 @@ fn explicitly_denied(policy: &GatePolicy, behavior: &Behavior) -> bool {
 
         Behavior::SymlinkCreate { link, .. } => matches_any(link, &policy.deny_link),
 
-        Behavior::HardlinkCreate { from, to } => {
+        Behavior::HardlinkCreate { from, to, .. } => {
             matches_any(from, &policy.deny_link) || matches_any(to, &policy.deny_link)
         }
 
@@ -177,7 +177,7 @@ fn allows_new_behavior(policy: &GatePolicy, behavior: &Behavior) -> bool {
             policy.allow_new_links || matches_any(link, &policy.allow_link)
         }
 
-        Behavior::HardlinkCreate { from, to } => {
+        Behavior::HardlinkCreate { from, to, .. } => {
             policy.allow_new_links
                 || (matches_any(from, &policy.allow_link) && matches_any(to, &policy.allow_link))
         }
@@ -300,6 +300,26 @@ mod tests {
         });
 
         assert!(!evaluate_gate(&baseline, &denied, &policy).allowed);
+    }
+
+    #[test]
+    fn flagged_hardlink_uses_existing_link_scope() {
+        let policy = GatePolicy {
+            allow_link: vec!["$PROJECT/safe/**".into()],
+            ..GatePolicy::default()
+        };
+
+        let baseline = BehaviorLock::new();
+
+        let mut observed = BehaviorLock::new();
+        observed.insert(Behavior::HardlinkCreate {
+            from: "$PROJECT/safe/source".into(),
+            to: "$PROJECT/safe/out".into(),
+            follow_symlink: true,
+            empty_path: false,
+        });
+
+        assert!(evaluate_gate(&baseline, &observed, &policy).allowed);
     }
 
     #[test]
