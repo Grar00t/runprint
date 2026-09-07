@@ -203,10 +203,22 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct RunprintConfig {
+    version: u32,
+
     #[serde(default)]
     gate: GatePolicy,
+}
+
+impl Default for RunprintConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            gate: GatePolicy::default(),
+        }
+    }
 }
 
 fn load_gate_policy(explicit: Option<&Path>) -> Result<GatePolicy> {
@@ -223,6 +235,14 @@ fn load_gate_policy(explicit: Option<&Path>) -> Result<GatePolicy> {
 
     let raw = fs::read_to_string(path)?;
     let config: RunprintConfig = toml::from_str(&raw)?;
+
+    if config.version != 1 {
+        anyhow::bail!(
+            "unsupported config version {} in {}",
+            config.version,
+            path.display()
+        );
+    }
 
     Ok(config.gate)
 }
@@ -253,5 +273,53 @@ fn render(item: &Behavior) -> String {
         }
         Behavior::NetworkConnect { address } => format!("connect  {address}"),
         Behavior::UnixConnect { path } => format!("ipc      {path}"),
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn config_rejects_unknown_gate_key() {
+        let raw = r#"
+version = 1
+
+[gate]
+allow_new_reads = true
+deny_wirte = ["$PROJECT/**"]
+"#;
+
+        let result = toml::from_str::<RunprintConfig>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_unknown_top_level_key() {
+        let raw = r#"
+version = 1
+mystery = true
+
+[gate]
+allow_new_reads = true
+"#;
+
+        let result = toml::from_str::<RunprintConfig>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_defaults_to_version_one() {
+        let raw = r#"
+[gate]
+allow_new_reads = false
+"#;
+
+        let config = toml::from_str::<RunprintConfig>(raw).unwrap();
+
+        assert_eq!(config.version, 1);
+        assert!(!config.gate.allow_new_reads);
     }
 }

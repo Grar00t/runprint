@@ -2,7 +2,7 @@ use crate::{Behavior, BehaviorLock};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct GatePolicy {
     pub allow_new_reads: bool,
     pub allow_new_exec: bool,
