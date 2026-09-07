@@ -8,6 +8,10 @@ use std::{
     process::Command,
 };
 
+const UNFINISHED_MARKER: &str = "<unfinished ...>";
+const RESUMED_MARKER: &str = " resumed>";
+const RESULT_MARKER: &str = ") = ";
+
 pub struct RecordedRun {
     pub lock: BehaviorLock,
     pub exit_code: i32,
@@ -114,7 +118,7 @@ fn parse_trace_dir(
             .ok_or_else(|| anyhow::anyhow!("missing trace for pid {pid}"))?;
 
         for line in lines {
-            if syscall_failed(line) {
+            if !observable_syscall(line) {
                 continue;
             }
 
@@ -167,7 +171,7 @@ fn load_traces(dir: &Path) -> Result<BTreeMap<u32, Vec<String>>> {
         };
 
         let text = fs::read_to_string(&path)?;
-        traces.insert(pid, text.lines().map(str::to_owned).collect());
+        traces.insert(pid, reassemble_trace_lines(&text));
     }
 
     Ok(traces)
@@ -176,6 +180,104 @@ fn load_traces(dir: &Path) -> Result<BTreeMap<u32, Vec<String>>> {
 fn trace_pid(path: &Path) -> Option<u32> {
     let name = path.file_name()?.to_str()?;
     name.strip_prefix("trace.")?.parse().ok()
+}
+
+/// strace splits a syscall that is interrupted mid-flight into an entry line
+/// ending in `<unfinished ...>` and a later `<... name resumed>` line that
+/// carries the real result. Neither half can be interpreted on its own, so the
+/// two halves are spliced back into a single line before any behavior is
+/// derived from them.
+///
+/// An entry half that never reports a result is dropped. Runprint must not
+/// record behavior that the kernel never confirmed.
+fn reassemble_trace_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut pending: Option<String> = None;
+
+    for line in text.lines() {
+        let line = line.trim_end();
+
+        if line.is_empty() {
+            continue;
+        }
+
+        // Signal deliveries and exit notices carry no syscall result.
+        if line.starts_with("---") || line.starts_with("+++") {
+            continue;
+        }
+
+        if let Some(head) = line.strip_suffix(UNFINISHED_MARKER) {
+            pending = Some(head.trim_end().to_string());
+            continue;
+        }
+
+        if let Some(tail) = resumed_tail(line) {
+            if let Some(head) = pending.take() {
+                lines.push(format!("{head}{tail}"));
+            }
+
+            continue;
+        }
+
+        lines.push(line.to_string());
+    }
+
+    lines
+}
+
+fn resumed_tail(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("<... ")?;
+    let end = rest.find(RESUMED_MARKER)?;
+
+    Some(&rest[end + RESUMED_MARKER.len()..])
+}
+
+/// The text strace printed after the syscall's closing `) = `.
+///
+/// Anchoring on the result region matters: a quoted path may itself contain
+/// text that looks like a failed result.
+fn syscall_result(line: &str) -> Option<&str> {
+    let position = line.rfind(RESULT_MARKER)?;
+
+    Some(line[position + RESULT_MARKER.len()..].trim())
+}
+
+/// A syscall counts as successful only when strace printed a non-negative
+/// result for it. Failures (`-1 ERRNO`), restarts (`? ERESTARTSYS`) and lines
+/// carrying no result at all are all rejected.
+fn syscall_succeeded(line: &str) -> bool {
+    match syscall_result(line) {
+        Some(result) => !result.starts_with('-') && !result.starts_with('?'),
+        None => false,
+    }
+}
+
+/// Syscalls whose reported result proves the operation reached the kernel.
+fn observable_syscall(line: &str) -> bool {
+    syscall_succeeded(line) || connect_in_progress(line)
+}
+
+/// A non-blocking `connect()` reports `-1 EINPROGRESS`, and a repeated attempt
+/// on the same socket reports `-1 EALREADY`, while the connection is genuinely
+/// initiated toward the printed destination. Treating those as "did not
+/// happen" hides the destinations of every event-loop based client.
+fn connect_in_progress(line: &str) -> bool {
+    if !line.starts_with("connect(") {
+        return false;
+    }
+
+    let Some(result) = syscall_result(line) else {
+        return false;
+    };
+
+    let Some(errno) = result.strip_prefix("-1 ") else {
+        return false;
+    };
+
+    matches!(
+        errno.split_whitespace().next(),
+        Some("EINPROGRESS") | Some("EALREADY")
+    )
 }
 
 fn parse_behavior_line(
@@ -478,26 +580,36 @@ fn insert_file_behavior(
     // strings such as O_RDWR from impersonating access flags.
     let flags = file_open_flags(line);
 
-    if flags.contains("O_RDWR") {
+    // O_PATH opens a reference used only for name resolution. It grants
+    // neither read nor write access to the file contents, so recording it as
+    // a read would overstate what the command did.
+    if flags_have_token(flags, "O_PATH") {
+        return;
+    }
+
+    // The access mode is a two-bit field printed as exactly one token, so a
+    // descriptor is readable unless it was opened write-only.
+    let write_only = flags_have_token(flags, "O_WRONLY");
+    let read_write = flags_have_token(flags, "O_RDWR");
+
+    // O_CREAT and O_TRUNC mutate the file even when the access mode itself is
+    // read-only, so they are write behavior in their own right.
+    let writable = write_only
+        || read_write
+        || flags_have_token(flags, "O_CREAT")
+        || flags_have_token(flags, "O_TRUNC");
+
+    if !write_only {
         lock.insert_normalized(
             Behavior::FileRead { path: path.clone() },
             include_system,
             context,
         );
-        lock.insert_normalized(Behavior::FileWrite { path }, include_system, context);
-        return;
     }
 
-    let write =
-        flags.contains("O_WRONLY") || flags.contains("O_CREAT") || flags.contains("O_TRUNC");
-
-    let behavior = if write {
-        Behavior::FileWrite { path }
-    } else {
-        Behavior::FileRead { path }
-    };
-
-    lock.insert_normalized(behavior, include_system, context);
+    if writable {
+        lock.insert_normalized(Behavior::FileWrite { path }, include_system, context);
+    }
 }
 
 fn file_open_flags(line: &str) -> &str {
@@ -513,6 +625,16 @@ fn file_open_flags(line: &str) -> &str {
     }
 
     &line[start..end]
+}
+
+/// Whole-token flag lookup inside a printed argument region.
+///
+/// Substring matching would find `O_RDWR` inside unrelated text, so the region
+/// is split on every character that cannot appear in a flag name.
+fn flags_have_token(flags: &str, wanted: &str) -> bool {
+    flags
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token == wanted)
 }
 
 fn renameat2_has_flag(line: &str, wanted: &str) -> bool {
@@ -618,11 +740,11 @@ fn child_pid(line: &str) -> Option<u32> {
         || line.starts_with("clone(")
         || line.starts_with("clone3(");
 
-    if !child_call || syscall_failed(line) {
+    if !child_call || !syscall_succeeded(line) {
         return None;
     }
 
-    let (_, result) = line.rsplit_once(" = ")?;
+    let result = syscall_result(line)?;
 
     result.split_whitespace().next()?.parse::<u32>().ok()
 }
@@ -636,10 +758,6 @@ fn angle_path(value: &str) -> Option<String> {
     let rest = &value[start..];
     let end = rest.find('>')?;
     Some(rest[..end].to_string())
-}
-
-fn syscall_failed(line: &str) -> bool {
-    line.contains(" = -1 ")
 }
 
 fn first_quoted_string(line: &str) -> Option<String> {
@@ -835,7 +953,7 @@ fn extract_strace_quoted_field(line: &str, field: &str) -> Option<String> {
 
     // Preserve current scope: pathname Unix sockets are quoted directly.
     // Abstract namespace sockets have a different strace representation
-    // and are not handled here yet.
+    // and are handled by extract_strace_abstract_unix_address.
     if !rest.starts_with('"') {
         return None;
     }
@@ -875,421 +993,4 @@ fn parse_connect(line: &str) -> Option<Behavior> {
     }
 
     if let Some(port) = extract_between(line, "sin6_port=htons(", ")") {
-        if let Some(ip) = extract_between(line, "inet_pton(AF_INET6, \"", "\"") {
-            return Some(Behavior::NetworkConnect {
-                address: format!("[{ip}]:{port}"),
-            });
-        }
-    }
-
-    None
-}
-
-fn extract_between(line: &str, start: &str, end: &str) -> Option<String> {
-    let start_pos = line.find(start)? + start.len();
-    let rest = &line[start_pos..];
-    let end_pos = rest.find(end)?;
-    Some(rest[..end_pos].to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolves_relative_path_from_cwd() {
-        assert_eq!(
-            resolve_path(Path::new("/project/subdir"), "output.txt"),
-            PathBuf::from("/project/subdir/output.txt")
-        );
-    }
-
-    #[test]
-    fn resolves_openat_fdcwd() {
-        let line = r#"openat(AT_FDCWD, "output.txt", O_WRONLY|O_CREAT, 0666) = 3"#;
-
-        assert_eq!(
-            resolve_openat(line, Path::new("/project/subdir"), "output.txt").unwrap(),
-            PathBuf::from("/project/subdir/output.txt")
-        );
-    }
-
-    #[test]
-    fn decodes_strace_c_escapes() {
-        let line = r#"openat(AT_FDCWD, "quote\"name\\tail\040space\012line", O_RDONLY) = 3"#;
-
-        assert_eq!(
-            nth_quoted_string(line, 0).as_deref(),
-            Some("quote\"name\\tail space\nline")
-        );
-    }
-
-    #[test]
-    fn decodes_strace_octal_utf8() {
-        let line = r#"openat(AT_FDCWD, "caf\303\251.txt", O_RDONLY) = 3"#;
-
-        assert_eq!(nth_quoted_string(line, 0).as_deref(), Some("café.txt"));
-    }
-
-    #[test]
-    fn preserves_unknown_strace_escape() {
-        let line = r#"openat(AT_FDCWD, "odd\qname.txt", O_RDONLY) = 3"#;
-
-        assert_eq!(
-            nth_quoted_string(line, 0).as_deref(),
-            Some(r"odd\qname.txt")
-        );
-    }
-
-    #[test]
-    fn parses_linkat_symlink_follow_semantics() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"linkat(AT_FDCWD</project>, "source-link", AT_FDCWD</project>, "out", AT_SYMLINK_FOLLOW) = 0"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
-            from: "$PROJECT/source-link".into(),
-            to: "$PROJECT/out".into(),
-            follow_symlink: true,
-            empty_path: false,
-        }));
-    }
-
-    #[test]
-    fn parses_linkat_empty_path_semantics() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"linkat(3</project/source.txt>, "", AT_FDCWD</project>, "out.txt", AT_EMPTY_PATH) = 0"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
-            from: "$PROJECT/source.txt".into(),
-            to: "$PROJECT/out.txt".into(),
-            follow_symlink: false,
-            empty_path: true,
-        }));
-    }
-
-    #[test]
-    fn linkat_path_named_flag_does_not_impersonate_flag() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"linkat(AT_FDCWD</project>, "AT_SYMLINK_FOLLOW", AT_FDCWD</project>, "out", 0) = 0"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::HardlinkCreate {
-            from: "$PROJECT/AT_SYMLINK_FOLLOW".into(),
-            to: "$PROJECT/out".into(),
-            follow_symlink: false,
-            empty_path: false,
-        }));
-    }
-
-    #[test]
-    fn parses_abstract_unix_socket_address() {
-        let behavior = parse_connect(
-            r#"connect(4<UNIX-STREAM:[84234]>, {sa_family=AF_UNIX, sun_path=@"runprint-abstract"}, 20) = 0"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            behavior,
-            Behavior::UnixAbstractConnect {
-                address: "@runprint-abstract".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn decodes_unix_socket_path_escapes() {
-        let behavior = parse_connect(
-            r#"connect(4<UNIX-STREAM:[71608]>, {sa_family=AF_UNIX, sun_path="sock\\name"}, 12) = 0"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            behavior,
-            Behavior::UnixConnect {
-                path: "sock\\name".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn decodes_unix_socket_escaped_quote() {
-        let behavior = parse_connect(
-            r#"connect(4<UNIX-STREAM:[71608]>, {sa_family=AF_UNIX, sun_path="sock\"name"}, 12) = 0"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            behavior,
-            Behavior::UnixConnect {
-                path: "sock\"name".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parses_renameat2_exchange() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"renameat2(AT_FDCWD</project>, "b.txt", AT_FDCWD</project>, "a.txt", RENAME_EXCHANGE) = 0"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert_eq!(lock.behaviors.len(), 1);
-
-        assert!(lock.behaviors.contains(&Behavior::RenameExchange {
-            left: "$PROJECT/a.txt".to_string(),
-            right: "$PROJECT/b.txt".to_string(),
-        }));
-    }
-
-    #[test]
-    fn renameat2_path_named_exchange_is_not_exchange_without_flag() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"renameat2(AT_FDCWD</project>, "RENAME_EXCHANGE", AT_FDCWD</project>, "b.txt", 0) = 0"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert_eq!(lock.behaviors.len(), 1);
-
-        assert!(lock.behaviors.contains(&Behavior::FileRename {
-            from: "$PROJECT/RENAME_EXCHANGE".to_string(),
-            to: "$PROJECT/b.txt".to_string(),
-        }));
-
-        assert!(!lock
-            .behaviors
-            .iter()
-            .any(|behavior| matches!(behavior, Behavior::RenameExchange { .. })));
-    }
-
-    #[test]
-    fn parses_two_rename_paths() {
-        let line = r#"rename("old.txt", "new.txt") = 0"#;
-
-        assert_eq!(nth_quoted_string(line, 0).as_deref(), Some("old.txt"));
-        assert_eq!(nth_quoted_string(line, 1).as_deref(), Some("new.txt"));
-    }
-
-    #[test]
-    fn parses_rdwr_as_read_and_write() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"openat(AT_FDCWD</project>, "data.txt", O_RDWR) = 3</project/data.txt>"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert_eq!(lock.behaviors.len(), 2);
-        assert!(lock.behaviors.contains(&Behavior::FileRead {
-            path: "$PROJECT/data.txt".to_string(),
-        }));
-        assert!(lock.behaviors.contains(&Behavior::FileWrite {
-            path: "$PROJECT/data.txt".to_string(),
-        }));
-    }
-
-    #[test]
-    fn creat_is_write_only() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"creat("created.txt", 0644) = 3</project/created.txt>"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert_eq!(lock.behaviors.len(), 1);
-        assert!(lock.behaviors.contains(&Behavior::FileWrite {
-            path: "$PROJECT/created.txt".to_string(),
-        }));
-    }
-
-    #[test]
-    fn path_named_rdwr_does_not_impersonate_access_flag() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"openat(AT_FDCWD</project>, "O_RDWR", O_RDONLY) = 3</project/O_RDWR>"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert_eq!(lock.behaviors.len(), 1);
-        assert!(lock.behaviors.contains(&Behavior::FileRead {
-            path: "$PROJECT/O_RDWR".to_string(),
-        }));
-        assert!(!lock.behaviors.contains(&Behavior::FileWrite {
-            path: "$PROJECT/O_RDWR".to_string(),
-        }));
-    }
-
-    #[test]
-    fn parses_openat2_fdcwd_read() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"openat2(AT_FDCWD</project>, "read.txt", {flags=O_RDONLY, resolve=0}, 24) = 3</project/read.txt>"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::FileRead {
-            path: "$PROJECT/read.txt".to_string(),
-        }));
-    }
-
-    #[test]
-    fn parses_openat2_directory_fd_write() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"openat2(3</project/sub>, "write.txt", {flags=O_WRONLY|O_CREAT|O_TRUNC, mode=0644, resolve=0}, 24) = 4</project/sub/write.txt>"#,
-            Path::new("/ignored"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::FileWrite {
-            path: "$PROJECT/sub/write.txt".to_string(),
-        }));
-    }
-
-    #[test]
-    fn parses_execveat_directory_fd() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"execveat(3</opt/app>, "tool", ["tool"], 0x0, 0) = 0"#,
-            Path::new("/ignored"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::Exec {
-            path: "/opt/app/tool".to_string(),
-        }));
-    }
-
-    #[test]
-    fn parses_execveat_empty_path_from_fd() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"execveat(3</project/target>, "", ["target"], 0x0, AT_EMPTY_PATH) = 0"#,
-            Path::new("/ignored"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::Exec {
-            path: "$PROJECT/target".to_string(),
-        }));
-    }
-
-    #[test]
-    fn parses_execveat_fdcwd() {
-        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
-
-        let mut lock = BehaviorLock::new();
-
-        parse_behavior_line(
-            r#"execveat(AT_FDCWD, "bin/tool", ["tool"], 0x0, 0) = 0"#,
-            Path::new("/project"),
-            &mut lock,
-            true,
-            &context,
-        )
-        .unwrap();
-
-        assert!(lock.behaviors.contains(&Behavior::Exec {
-            path: "$PROJECT/bin/tool".to_string(),
-        }));
-    }
-
-    #[test]
-    fn resolves_openat_directory_fd() {
-        let line = r#"openat(3</project/assets>, "config.json", O_RDONLY) = 4"#;
-
-        assert_eq!(
-            resolve_openat(line, Path::new("/ignored"), "config.json").unwrap(),
-            PathBuf::from("/project/assets/config.json")
-        );
-    }
-}
+        if let Some(ip) = extract_between(line, "inet_pton(AF_INET6, \"", "\
