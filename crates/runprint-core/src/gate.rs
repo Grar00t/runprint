@@ -238,19 +238,16 @@ mod tests {
         assert!(pattern_matches("$PROJECT/dist/app.js", "$PROJECT/dist/**"));
         assert!(pattern_matches("$PROJECT/dist", "$PROJECT/dist/**"));
         assert!(!pattern_matches("$PROJECT/src/app.js", "$PROJECT/dist/**"));
-        assert!(!pattern_matches("$PROJECT/disturbed/app.js", "$PROJECT/dist/**"));
+        assert!(!pattern_matches(
+            "$PROJECT/disturbed/app.js",
+            "$PROJECT/dist/**"
+        ));
     }
 
     #[test]
     fn explicit_prefix_pattern_matches_network_host() {
-        assert!(pattern_matches(
-            "127.0.0.1:8080",
-            "prefix:127.0.0.1:"
-        ));
-        assert!(!pattern_matches(
-            "203.0.113.10:8080",
-            "prefix:127.0.0.1:"
-        ));
+        assert!(pattern_matches("127.0.0.1:8080", "prefix:127.0.0.1:"));
+        assert!(!pattern_matches("203.0.113.10:8080", "prefix:127.0.0.1:"));
     }
 
     #[test]
