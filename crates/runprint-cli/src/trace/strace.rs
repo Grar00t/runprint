@@ -447,7 +447,8 @@ mod tests {
 
     #[test]
     fn signal_and_exit_notices_are_dropped() {
-        let text = "--- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED} ---\n+++ exited with 0 +++\n";
+        let text =
+            "--- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED} ---\n+++ exited with 0 +++\n";
 
         assert!(reassemble_trace_lines(text).is_empty());
     }
@@ -464,7 +465,8 @@ mod tests {
 
     #[test]
     fn failed_syscall_is_not_observable() {
-        let line = r#"openat(AT_FDCWD, "missing", O_RDONLY) = -1 ENOENT (No such file or directory)"#;
+        let line =
+            r#"openat(AT_FDCWD, "missing", O_RDONLY) = -1 ENOENT (No such file or directory)"#;
 
         assert!(!observable_syscall(line));
     }
@@ -514,7 +516,8 @@ mod tests {
 
     #[test]
     fn in_progress_errno_only_applies_to_connect() {
-        let line = r#"openat(AT_FDCWD, "x", O_RDONLY) = -1 EINPROGRESS (Operation now in progress)"#;
+        let line =
+            r#"openat(AT_FDCWD, "x", O_RDONLY) = -1 EINPROGRESS (Operation now in progress)"#;
 
         assert!(!observable_syscall(line));
     }
@@ -540,7 +543,8 @@ mod tests {
 
     #[test]
     fn abstract_unix_address_is_prefixed() {
-        let line = r#"connect(4<UNIX-STREAM:[84234]>, {sa_family=AF_UNIX, sun_path=@"abstract"}, 20) = 0"#;
+        let line =
+            r#"connect(4<UNIX-STREAM:[84234]>, {sa_family=AF_UNIX, sun_path=@"abstract"}, 20) = 0"#;
 
         assert_eq!(
             extract_strace_abstract_unix_address(line).as_deref(),
@@ -550,7 +554,8 @@ mod tests {
 
     #[test]
     fn abstract_field_is_not_read_as_a_pathname_socket() {
-        let line = r#"connect(4<UNIX-STREAM:[84234]>, {sa_family=AF_UNIX, sun_path=@"abstract"}, 20) = 0"#;
+        let line =
+            r#"connect(4<UNIX-STREAM:[84234]>, {sa_family=AF_UNIX, sun_path=@"abstract"}, 20) = 0"#;
 
         assert_eq!(extract_strace_quoted_field(line, "sun_path="), None);
     }
