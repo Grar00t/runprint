@@ -84,9 +84,7 @@ impl std::fmt::Display for PolicyPatternError {
         write!(
             formatter,
             "{} pattern {:?}: {}",
-            self.field,
-            self.pattern,
-            self.reason
+            self.field, self.pattern, self.reason
         )
     }
 }
@@ -384,7 +382,10 @@ mod tests {
 
     #[test]
     fn sibling_directory_cannot_escape_recursive_scope() {
-        assert!(!pattern_matches("$HOME/project-other/x", "$HOME/project/**"));
+        assert!(!pattern_matches(
+            "$HOME/project-other/x",
+            "$HOME/project/**"
+        ));
         assert!(pattern_matches("$HOME/project/x", "$HOME/project/**"));
         assert!(!pattern_matches("$TMP/build-other", "$TMP/build/**"));
         assert!(pattern_matches("$TMP/build/out", "$TMP/build/**"));
