@@ -195,6 +195,18 @@ fn parse_behavior_line(
         return Ok(());
     }
 
+    if line.starts_with("execveat(") {
+        if let Some(raw) = first_quoted_string(line) {
+            let path = resolve_openat(line, cwd, &raw)?
+                .to_string_lossy()
+                .into_owned();
+
+            lock.insert_normalized(Behavior::Exec { path }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
     if line.starts_with("open(") || line.starts_with("creat(") {
         if let Some(raw) = first_quoted_string(line) {
             insert_file_behavior(line, resolve_path(cwd, &raw), lock, include_system, context);
@@ -668,6 +680,46 @@ mod tests {
 
         assert_eq!(nth_quoted_string(line, 0).as_deref(), Some("old.txt"));
         assert_eq!(nth_quoted_string(line, 1).as_deref(), Some("new.txt"));
+    }
+
+    #[test]
+    fn parses_execveat_directory_fd() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"execveat(3</opt/app>, "tool", ["tool"], 0x0, 0) = 0"#,
+            Path::new("/ignored"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::Exec {
+            path: "/opt/app/tool".to_string(),
+        }));
+    }
+
+    #[test]
+    fn parses_execveat_fdcwd() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"execveat(AT_FDCWD, "bin/tool", ["tool"], 0x0, 0) = 0"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert!(lock.behaviors.contains(&Behavior::Exec {
+            path: "$PROJECT/bin/tool".to_string(),
+        }));
     }
 
     #[test]
