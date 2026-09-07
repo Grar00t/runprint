@@ -2,7 +2,12 @@ mod trace;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use runprint_core::{diff, gate::evaluate_gate, Behavior, BehaviorLock};
+use runprint_core::{
+    diff,
+    gate::{evaluate_gate, GatePolicy},
+    Behavior, BehaviorLock,
+};
+use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -47,6 +52,9 @@ enum Commands {
     Gate {
         #[arg(short, long, default_value = "behavior.lock")]
         baseline: PathBuf,
+
+        #[arg(long)]
+        config: Option<PathBuf>,
 
         #[arg(long)]
         include_system: bool,
@@ -117,12 +125,14 @@ fn main() -> Result<()> {
 
         Commands::Gate {
             baseline,
+            config,
             include_system,
             command,
         } => {
             let baseline = load(&baseline)?;
+            let policy = load_gate_policy(config.as_deref())?;
             let run = trace::record(&command, include_system)?;
-            let result = evaluate_gate(&baseline, &run.lock);
+            let result = evaluate_gate(&baseline, &run.lock, &policy);
 
             println!();
             println!("Runprint Gate");
@@ -191,6 +201,30 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RunprintConfig {
+    #[serde(default)]
+    gate: GatePolicy,
+}
+
+fn load_gate_policy(explicit: Option<&Path>) -> Result<GatePolicy> {
+    let default_path = Path::new(".runprint.toml");
+    let path = explicit.unwrap_or(default_path);
+
+    if !path.exists() {
+        if explicit.is_some() {
+            anyhow::bail!("config not found: {}", path.display());
+        }
+
+        return Ok(GatePolicy::default());
+    }
+
+    let raw = fs::read_to_string(path)?;
+    let config: RunprintConfig = toml::from_str(&raw)?;
+
+    Ok(config.gate)
 }
 
 fn save(path: &Path, lock: &BehaviorLock) -> Result<()> {
