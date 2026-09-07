@@ -54,10 +54,10 @@ fn main() -> Result<()> {
             include_system,
             command,
         } => {
-            let lock = trace::record(&command, include_system)?;
-            save(&output, &lock)?;
+            let run = trace::record(&command, include_system)?;
+            save(&output, &run.lock)?;
 
-            let counts = lock.counts();
+            let counts = run.lock.counts();
 
             println!();
             println!("Runprint");
@@ -65,13 +65,20 @@ fn main() -> Result<()> {
             println!("exec       {}", counts.exec);
             println!("file read  {}", counts.file_read);
             println!("file write {}", counts.file_write);
+            println!("delete     {}", counts.file_delete);
+            println!("rename     {}", counts.file_rename);
             println!("network    {}", counts.network);
             println!("unix       {}", counts.unix);
             println!("-----------");
             println!("total      {}", counts.total());
             println!();
-            println!("digest     {}", lock.digest()?);
+            println!("digest     {}", run.lock.digest()?);
+            println!("exit       {}", run.exit_code);
             println!("saved      {}", output.display());
+
+            if run.exit_code != 0 {
+                std::process::exit(run.exit_code);
+            }
         }
 
         Commands::Diff { old, new } => {
@@ -99,12 +106,18 @@ fn main() -> Result<()> {
             command,
         } => {
             let expected = load(&baseline)?;
-            let observed = trace::record(&command, include_system)?;
-            let d = diff(&expected, &observed);
+            let run = trace::record(&command, include_system)?;
+            let d = diff(&expected, &run.lock);
 
             if d.added.is_empty() && d.removed.is_empty() {
                 println!();
                 println!("runtime behavior unchanged");
+
+                if run.exit_code != 0 {
+                    eprintln!("command exited with {}", run.exit_code);
+                    std::process::exit(run.exit_code);
+                }
+
                 return Ok(());
             }
 
@@ -141,6 +154,8 @@ fn render(item: &Behavior) -> String {
         Behavior::Exec { path } => format!("exec     {path}"),
         Behavior::FileRead { path } => format!("read     {path}"),
         Behavior::FileWrite { path } => format!("write    {path}"),
+        Behavior::FileDelete { path } => format!("delete   {path}"),
+        Behavior::FileRename { from, to } => format!("rename   {from} -> {to}"),
         Behavior::NetworkConnect { address } => format!("connect  {address}"),
         Behavior::UnixConnect { path } => format!("ipc      {path}"),
     }

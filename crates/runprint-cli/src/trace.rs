@@ -7,7 +7,12 @@ use std::{
     process::Command,
 };
 
-pub fn record(command: &[String], include_system: bool) -> Result<BehaviorLock> {
+pub struct RecordedRun {
+    pub lock: BehaviorLock,
+    pub exit_code: i32,
+}
+
+pub fn record(command: &[String], include_system: bool) -> Result<RecordedRun> {
     if command.is_empty() {
         bail!("missing command");
     }
@@ -39,16 +44,16 @@ pub fn record(command: &[String], include_system: bool) -> Result<BehaviorLock> 
         .status()
         .context("failed to execute strace; is strace installed?")?;
 
-    if !status.success() {
-        eprintln!("command exited with {status}");
-    }
+    let exit_code = status.code().unwrap_or(128);
 
-    parse_trace_dir(
+    let lock = parse_trace_dir(
         dir.path(),
         include_system,
         &normalize_context,
         &project_root,
-    )
+    )?;
+
+    Ok(RecordedRun { lock, exit_code })
 }
 
 fn parse_trace_dir(
@@ -206,6 +211,79 @@ fn parse_behavior_line(
         return Ok(());
     }
 
+    if line.starts_with("unlink(") || line.starts_with("rmdir(") {
+        if let Some(raw) = first_quoted_string(line) {
+            let path = resolve_path(cwd, &raw).to_string_lossy().into_owned();
+
+            lock.insert_normalized(Behavior::FileDelete { path }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("unlinkat(") {
+        if let Some(raw) = first_quoted_string(line) {
+            let path = resolve_openat(line, cwd, &raw)?
+                .to_string_lossy()
+                .into_owned();
+
+            lock.insert_normalized(Behavior::FileDelete { path }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("rename(") {
+        let from = nth_quoted_string(line, 0);
+        let to = nth_quoted_string(line, 1);
+
+        if let (Some(from), Some(to)) = (from, to) {
+            let from = resolve_path(cwd, &from).to_string_lossy().into_owned();
+            let to = resolve_path(cwd, &to).to_string_lossy().into_owned();
+
+            lock.insert_normalized(Behavior::FileRename { from, to }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("renameat(") || line.starts_with("renameat2(") {
+        let from = nth_quoted_string(line, 0);
+        let to = nth_quoted_string(line, 1);
+
+        if let (Some(from), Some(to)) = (from, to) {
+            let from = resolve_openat(line, cwd, &from)?;
+
+            let first_end =
+                quoted_end(line, 0).ok_or_else(|| anyhow::anyhow!("malformed renameat source"))?;
+
+            let after = &line[first_end + 1..];
+            let after = after
+                .trim_start()
+                .strip_prefix(',')
+                .ok_or_else(|| anyhow::anyhow!("malformed renameat arguments"))?
+                .trim_start();
+
+            let comma = after
+                .find(',')
+                .ok_or_else(|| anyhow::anyhow!("missing renameat destination dirfd"))?;
+
+            let dirfd = after[..comma].trim();
+            let to = resolve_dirfd(dirfd, cwd, &to)?;
+
+            lock.insert_normalized(
+                Behavior::FileRename {
+                    from: from.to_string_lossy().into_owned(),
+                    to: to.to_string_lossy().into_owned(),
+                },
+                include_system,
+                context,
+            );
+        }
+
+        return Ok(());
+    }
+
     if line.starts_with("connect(") {
         if let Some(behavior) = parse_connect(line) {
             lock.insert_normalized(behavior, include_system, context);
@@ -258,6 +336,16 @@ fn resolve_openat(line: &str, cwd: &Path, raw: &str) -> Result<PathBuf> {
 
     let dirfd = rest[..comma].trim();
 
+    resolve_dirfd(dirfd, cwd, raw)
+}
+
+fn resolve_dirfd(dirfd: &str, cwd: &Path, raw: &str) -> Result<PathBuf> {
+    let raw_path = PathBuf::from(raw);
+
+    if raw_path.is_absolute() {
+        return Ok(raw_path);
+    }
+
     if dirfd.starts_with("AT_FDCWD") {
         return Ok(cwd.join(raw));
     }
@@ -266,7 +354,7 @@ fn resolve_openat(line: &str, cwd: &Path, raw: &str) -> Result<PathBuf> {
         return Ok(PathBuf::from(base).join(raw));
     }
 
-    bail!("unable to resolve openat dirfd: {dirfd}")
+    bail!("unable to resolve dirfd: {dirfd}")
 }
 
 fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
@@ -310,10 +398,75 @@ fn syscall_failed(line: &str) -> bool {
 }
 
 fn first_quoted_string(line: &str) -> Option<String> {
-    let start = line.find('"')? + 1;
-    let rest = &line[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    nth_quoted_string(line, 0)
+}
+
+fn nth_quoted_string(line: &str, wanted: usize) -> Option<String> {
+    let mut in_quote = false;
+    let mut escaped = false;
+    let mut start = 0usize;
+    let mut index = 0usize;
+
+    for (pos, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' && in_quote {
+            escaped = true;
+            continue;
+        }
+
+        if ch == '"' {
+            if !in_quote {
+                start = pos + 1;
+                in_quote = true;
+            } else {
+                if index == wanted {
+                    return Some(line[start..pos].to_string());
+                }
+
+                index += 1;
+                in_quote = false;
+            }
+        }
+    }
+
+    None
+}
+
+fn quoted_end(line: &str, wanted: usize) -> Option<usize> {
+    let mut in_quote = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+
+    for (pos, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' && in_quote {
+            escaped = true;
+            continue;
+        }
+
+        if ch == '"' {
+            if !in_quote {
+                in_quote = true;
+            } else {
+                if index == wanted {
+                    return Some(pos);
+                }
+
+                index += 1;
+                in_quote = false;
+            }
+        }
+    }
+
+    None
 }
 
 fn parse_connect(line: &str) -> Option<Behavior> {
@@ -367,6 +520,14 @@ mod tests {
             resolve_openat(line, Path::new("/project/subdir"), "output.txt").unwrap(),
             PathBuf::from("/project/subdir/output.txt")
         );
+    }
+
+    #[test]
+    fn parses_two_rename_paths() {
+        let line = r#"rename("old.txt", "new.txt") = 0"#;
+
+        assert_eq!(nth_quoted_string(line, 0).as_deref(), Some("old.txt"));
+        assert_eq!(nth_quoted_string(line, 1).as_deref(), Some("new.txt"));
     }
 
     #[test]

@@ -10,6 +10,8 @@ pub enum Behavior {
     Exec { path: String },
     FileRead { path: String },
     FileWrite { path: String },
+    FileDelete { path: String },
+    FileRename { from: String, to: String },
     NetworkConnect { address: String },
     UnixConnect { path: String },
 }
@@ -42,13 +44,21 @@ pub struct BehaviorCounts {
     pub exec: usize,
     pub file_read: usize,
     pub file_write: usize,
+    pub file_delete: usize,
+    pub file_rename: usize,
     pub network: usize,
     pub unix: usize,
 }
 
 impl BehaviorCounts {
     pub fn total(&self) -> usize {
-        self.exec + self.file_read + self.file_write + self.network + self.unix
+        self.exec
+            + self.file_read
+            + self.file_write
+            + self.file_delete
+            + self.file_rename
+            + self.network
+            + self.unix
     }
 }
 
@@ -83,6 +93,8 @@ impl BehaviorLock {
                 Behavior::Exec { .. } => counts.exec += 1,
                 Behavior::FileRead { .. } => counts.file_read += 1,
                 Behavior::FileWrite { .. } => counts.file_write += 1,
+                Behavior::FileDelete { .. } => counts.file_delete += 1,
+                Behavior::FileRename { .. } => counts.file_rename += 1,
                 Behavior::NetworkConnect { .. } => counts.network += 1,
                 Behavior::UnixConnect { .. } => counts.unix += 1,
             }
@@ -138,6 +150,15 @@ pub fn normalize_behavior(
 
         Behavior::FileWrite { path } => Some(Behavior::FileWrite {
             path: normalize_runtime_path(&path, context),
+        }),
+
+        Behavior::FileDelete { path } => Some(Behavior::FileDelete {
+            path: normalize_runtime_path(&path, context),
+        }),
+
+        Behavior::FileRename { from, to } => Some(Behavior::FileRename {
+            from: normalize_runtime_path(&from, context),
+            to: normalize_runtime_path(&to, context),
         }),
 
         Behavior::Exec { path } => Some(Behavior::Exec {
@@ -250,6 +271,8 @@ fn is_runtime_noise(path: &str) -> bool {
         || path.starts_with("/usr/share/locale/")
         || path.starts_with("/usr/share/coreutils/locales/")
         || path.starts_with("/usr/share/zoneinfo/")
+        || path.starts_with("/usr/lib/locale/")
+        || path.contains("/gconv/gconv-modules.cache")
         || is_shared_library(path)
 }
 
