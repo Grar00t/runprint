@@ -41,6 +41,9 @@ jobs:
       - name: Landlock TCP capability matrix
         run: bash tests/landlock_net_matrix.sh ./target/release/runprint
 
+      - name: Symbolic path scope matrix
+        run: bash tests/path_scope_matrix.sh ./target/release/runprint
+
       - name: Determinism smoke test
         run: |
           ./target/release/runprint record --output behavior.lock -- /bin/echo hello

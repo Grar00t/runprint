@@ -208,13 +208,22 @@ fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bo
     let canonical = fs::canonicalize(&expanded)
         .with_context(|| format!("enforcement path does not exist: {}", expanded.display()))?;
 
-    if is_project_scoped(raw) {
-        let canonical_project_root =
-            fs::canonicalize(project_root).context("failed to canonicalize project root")?;
+    if let Some(scope) = path_scope(raw) {
+        let scope_root = scope_root(scope, project_root)?;
 
-        if !canonical.starts_with(&canonical_project_root) {
+        let canonical_scope_root = fs::canonicalize(&scope_root).with_context(|| {
+            format!(
+                "failed to canonicalize {} scope root: {}",
+                scope.label(),
+                scope_root.display()
+            )
+        })?;
+
+        if !canonical.starts_with(&canonical_scope_root) {
             bail!(
-                "project-scoped enforcement path escapes project root: {} -> {}",
+                "{}-scoped enforcement path escapes {} root: {} -> {}",
+                scope.label(),
+                scope.label(),
                 expanded.display(),
                 canonical.display()
             );
@@ -237,10 +246,50 @@ fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bo
     Ok((canonical, recursive))
 }
 
-fn is_project_scoped(raw: &str) -> bool {
-    raw == "$PROJECT"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathScope {
+    Project,
+    Home,
+    Tmp,
+}
+
+impl PathScope {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Home => "HOME",
+            Self::Tmp => "TMP",
+        }
+    }
+}
+
+fn path_scope(raw: &str) -> Option<PathScope> {
+    if raw == "$PROJECT"
         || raw.starts_with("$PROJECT/")
         || (!raw.starts_with('$') && !Path::new(raw).is_absolute())
+    {
+        return Some(PathScope::Project);
+    }
+
+    if raw == "$HOME" || raw.starts_with("$HOME/") {
+        return Some(PathScope::Home);
+    }
+
+    if raw == "$TMP" || raw.starts_with("$TMP/") {
+        return Some(PathScope::Tmp);
+    }
+
+    None
+}
+
+fn scope_root(scope: PathScope, project_root: &Path) -> Result<PathBuf> {
+    match scope {
+        PathScope::Project => Ok(project_root.to_path_buf()),
+        PathScope::Home => env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is not set")),
+        PathScope::Tmp => Ok(env::temp_dir()),
+    }
 }
 
 fn expand_path(raw: &str, project_root: &Path) -> Result<PathBuf> {
@@ -339,6 +388,15 @@ mod tests {
 
         assert!(recursive);
         assert_eq!(resolved, fs::canonicalize(&inside).unwrap());
+    }
+
+    #[test]
+    fn enforcement_path_scopes_are_classified() {
+        assert_eq!(path_scope("$PROJECT/out"), Some(PathScope::Project));
+        assert_eq!(path_scope("relative/out"), Some(PathScope::Project));
+        assert_eq!(path_scope("$HOME/out"), Some(PathScope::Home));
+        assert_eq!(path_scope("$TMP/out"), Some(PathScope::Tmp));
+        assert_eq!(path_scope("/var/tmp/out"), None);
     }
 
     #[test]
