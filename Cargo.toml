@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/runprint-core",
+    "crates/runprint-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["Sulaiman Alshammari"]
+license = "MIT"
+repository = "https://github.com/Grar00t/runprint"
+homepage = "https://github.com/Grar00t/runprint"
+description = "A lockfile for runtime behavior"
+keywords = ["runtime", "observability", "lockfile", "linux", "developer-tools"]
+categories = ["development-tools"]
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

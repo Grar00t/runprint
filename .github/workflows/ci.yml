@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install runtime observer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Check
+        run: cargo check --workspace
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Determinism smoke test
+        run: |
+          ./target/release/runprint record --output behavior.lock -- /bin/echo hello
+          ./target/release/runprint check --baseline behavior.lock -- /bin/echo hello

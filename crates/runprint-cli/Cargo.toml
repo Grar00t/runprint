@@ -1,0 +1,20 @@
+[package]
+name = "runprint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Record, lock, and diff program runtime behavior"
+
+[[bin]]
+name = "runprint"
+path = "src/main.rs"
+
+[dependencies]
+runprint-core = { path = "../runprint-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
