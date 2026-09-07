@@ -333,6 +333,9 @@ fn render(item: &Behavior) -> String {
         }
         Behavior::NetworkConnect { address } => format!("connect  {address}"),
         Behavior::UnixConnect { path } => format!("ipc      {path}"),
+        Behavior::UnixAbstractConnect { address } => {
+            format!("ipc      {address}")
+        }
     }
 }
 
@@ -354,7 +357,7 @@ mod config_tests {
     }
 
     #[test]
-    fn lock_loader_accepts_current_v2() {
+    fn lock_loader_accepts_legacy_v2() {
         let raw = br#"{
             "version": 2,
             "behaviors": []
@@ -367,9 +370,29 @@ mod config_tests {
     }
 
     #[test]
-    fn lock_loader_rejects_future_version_before_behavior_decode() {
+    fn lock_loader_accepts_current_v3() {
         let raw = br#"{
             "version": 3,
+            "behaviors": [
+                {
+                    "kind": "unix_abstract_connect",
+                    "address": "@runprint-abstract"
+                }
+            ]
+        }"#;
+
+        let lock = parse_lock(raw).unwrap();
+
+        assert_eq!(lock.version, 3);
+        assert!(lock.behaviors.contains(&Behavior::UnixAbstractConnect {
+            address: "@runprint-abstract".into(),
+        }));
+    }
+
+    #[test]
+    fn lock_loader_rejects_future_version_before_behavior_decode() {
+        let raw = br#"{
+            "version": 4,
             "behaviors": [
                 {
                     "kind": "future_behavior_that_this_binary_does_not_know",
@@ -380,7 +403,7 @@ mod config_tests {
 
         let error = parse_lock(raw).unwrap_err();
 
-        assert_eq!(error.to_string(), "unsupported behavior lock version 3");
+        assert_eq!(error.to_string(), "unsupported behavior lock version 4");
     }
 
     #[test]

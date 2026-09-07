@@ -136,6 +136,8 @@ fn explicitly_denied(policy: &GatePolicy, behavior: &Behavior) -> bool {
         Behavior::NetworkConnect { address } => matches_any(address, &policy.deny_network),
 
         Behavior::UnixConnect { path } => matches_any(path, &policy.deny_unix),
+
+        Behavior::UnixAbstractConnect { address } => matches_any(address, &policy.deny_unix),
     }
 }
 
@@ -186,6 +188,10 @@ fn allows_new_behavior(policy: &GatePolicy, behavior: &Behavior) -> bool {
 
         Behavior::UnixConnect { path } => {
             policy.allow_new_unix || matches_any(path, &policy.allow_unix)
+        }
+
+        Behavior::UnixAbstractConnect { address } => {
+            policy.allow_new_unix || matches_any(address, &policy.allow_unix)
         }
     }
 }
@@ -294,6 +300,23 @@ mod tests {
         });
 
         assert!(!evaluate_gate(&baseline, &denied, &policy).allowed);
+    }
+
+    #[test]
+    fn scoped_abstract_unix_connect_is_allowed() {
+        let policy = GatePolicy {
+            allow_unix: vec!["@runprint-*".into()],
+            ..GatePolicy::default()
+        };
+
+        let baseline = BehaviorLock::new();
+
+        let mut observed = BehaviorLock::new();
+        observed.insert(Behavior::UnixAbstractConnect {
+            address: "@runprint-abstract".into(),
+        });
+
+        assert!(evaluate_gate(&baseline, &observed, &policy).allowed);
     }
 
     #[test]

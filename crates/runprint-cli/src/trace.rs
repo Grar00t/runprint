@@ -778,7 +778,25 @@ fn extract_strace_quoted_field(line: &str, field: &str) -> Option<String> {
     first_quoted_string(rest)
 }
 
+fn extract_strace_abstract_unix_address(line: &str) -> Option<String> {
+    let field = "sun_path=@";
+    let start = line.find(field)? + field.len();
+    let rest = &line[start..];
+
+    if !rest.starts_with('"') {
+        return None;
+    }
+
+    let name = first_quoted_string(rest)?;
+
+    Some(format!("@{name}"))
+}
+
 fn parse_connect(line: &str) -> Option<Behavior> {
+    if let Some(address) = extract_strace_abstract_unix_address(line) {
+        return Some(Behavior::UnixAbstractConnect { address });
+    }
+
     if let Some(path) = extract_strace_quoted_field(line, "sun_path=") {
         return Some(Behavior::UnixConnect { path });
     }
@@ -855,6 +873,21 @@ mod tests {
         assert_eq!(
             nth_quoted_string(line, 0).as_deref(),
             Some(r"odd\qname.txt")
+        );
+    }
+
+    #[test]
+    fn parses_abstract_unix_socket_address() {
+        let behavior = parse_connect(
+            r#"connect(4<UNIX-STREAM:[84234]>, {sa_family=AF_UNIX, sun_path=@"runprint-abstract"}, 20) = 0"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            behavior,
+            Behavior::UnixAbstractConnect {
+                address: "@runprint-abstract".to_string(),
+            }
         );
     }
 

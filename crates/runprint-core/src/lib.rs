@@ -7,7 +7,7 @@ use std::{
 };
 
 pub const BEHAVIOR_LOCK_MIN_SUPPORTED_VERSION: u32 = 1;
-pub const BEHAVIOR_LOCK_CURRENT_VERSION: u32 = 2;
+pub const BEHAVIOR_LOCK_CURRENT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -24,6 +24,7 @@ pub enum Behavior {
     HardlinkCreate { from: String, to: String },
     NetworkConnect { address: String },
     UnixConnect { path: String },
+    UnixAbstractConnect { address: String },
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +126,9 @@ impl BehaviorLock {
                 Behavior::SymlinkCreate { .. } => counts.symlink_create += 1,
                 Behavior::HardlinkCreate { .. } => counts.hardlink_create += 1,
                 Behavior::NetworkConnect { .. } => counts.network += 1,
-                Behavior::UnixConnect { .. } => counts.unix += 1,
+                Behavior::UnixConnect { .. } | Behavior::UnixAbstractConnect { .. } => {
+                    counts.unix += 1
+                }
             }
         }
 
@@ -233,6 +236,10 @@ pub fn normalize_behavior(
             }
 
             Some(Behavior::UnixConnect { path })
+        }
+
+        Behavior::UnixAbstractConnect { address } => {
+            Some(Behavior::UnixAbstractConnect { address })
         }
 
         Behavior::NetworkConnect { address } => Some(Behavior::NetworkConnect { address }),
@@ -371,7 +378,8 @@ mod tests {
         assert!(!BehaviorLock::is_supported_version(0));
         assert!(BehaviorLock::is_supported_version(1));
         assert!(BehaviorLock::is_supported_version(2));
-        assert!(!BehaviorLock::is_supported_version(3));
+        assert!(BehaviorLock::is_supported_version(3));
+        assert!(!BehaviorLock::is_supported_version(4));
     }
 
     #[test]
@@ -486,6 +494,20 @@ mod tests {
             Some(Behavior::RenameExchange {
                 left: "$PROJECT/a.txt".into(),
                 right: "$PROJECT/z.txt".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn abstract_unix_address_is_not_path_normalized() {
+        let behavior = Behavior::UnixAbstractConnect {
+            address: "@runprint-abstract".into(),
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::UnixAbstractConnect {
+                address: "@runprint-abstract".into(),
             })
         );
     }
