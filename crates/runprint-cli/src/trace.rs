@@ -466,10 +466,30 @@ fn insert_file_behavior(
 ) {
     let path = path.to_string_lossy().into_owned();
 
-    let write = line.contains("O_WRONLY")
-        || line.contains("O_RDWR")
-        || line.contains("O_CREAT")
-        || line.contains("O_TRUNC");
+    // creat() is equivalent to opening with O_WRONLY|O_CREAT|O_TRUNC,
+    // but strace prints no access flags for the creat syscall itself.
+    if line.starts_with("creat(") {
+        lock.insert_normalized(Behavior::FileWrite { path }, include_system, context);
+        return;
+    }
+
+    // Only inspect the syscall argument region after the quoted path.
+    // This prevents path names or returned -yy fd annotations containing
+    // strings such as O_RDWR from impersonating access flags.
+    let flags = file_open_flags(line);
+
+    if flags.contains("O_RDWR") {
+        lock.insert_normalized(
+            Behavior::FileRead { path: path.clone() },
+            include_system,
+            context,
+        );
+        lock.insert_normalized(Behavior::FileWrite { path }, include_system, context);
+        return;
+    }
+
+    let write =
+        flags.contains("O_WRONLY") || flags.contains("O_CREAT") || flags.contains("O_TRUNC");
 
     let behavior = if write {
         Behavior::FileWrite { path }
@@ -478,6 +498,21 @@ fn insert_file_behavior(
     };
 
     lock.insert_normalized(behavior, include_system, context);
+}
+
+fn file_open_flags(line: &str) -> &str {
+    let Some(path_end) = quoted_end(line, 0) else {
+        return "";
+    };
+
+    let start = path_end + 1;
+    let end = line.rfind(") =").unwrap_or(line.len());
+
+    if start >= end {
+        return "";
+    }
+
+    &line[start..end]
 }
 
 fn renameat2_has_flag(line: &str, wanted: &str) -> bool {
@@ -1077,6 +1112,75 @@ mod tests {
 
         assert_eq!(nth_quoted_string(line, 0).as_deref(), Some("old.txt"));
         assert_eq!(nth_quoted_string(line, 1).as_deref(), Some("new.txt"));
+    }
+
+    #[test]
+    fn parses_rdwr_as_read_and_write() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"openat(AT_FDCWD</project>, "data.txt", O_RDWR) = 3</project/data.txt>"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(lock.behaviors.len(), 2);
+        assert!(lock.behaviors.contains(&Behavior::FileRead {
+            path: "$PROJECT/data.txt".to_string(),
+        }));
+        assert!(lock.behaviors.contains(&Behavior::FileWrite {
+            path: "$PROJECT/data.txt".to_string(),
+        }));
+    }
+
+    #[test]
+    fn creat_is_write_only() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"creat("created.txt", 0644) = 3</project/created.txt>"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(lock.behaviors.len(), 1);
+        assert!(lock.behaviors.contains(&Behavior::FileWrite {
+            path: "$PROJECT/created.txt".to_string(),
+        }));
+    }
+
+    #[test]
+    fn path_named_rdwr_does_not_impersonate_access_flag() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"openat(AT_FDCWD</project>, "O_RDWR", O_RDONLY) = 3</project/O_RDWR>"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(lock.behaviors.len(), 1);
+        assert!(lock.behaviors.contains(&Behavior::FileRead {
+            path: "$PROJECT/O_RDWR".to_string(),
+        }));
+        assert!(!lock.behaviors.contains(&Behavior::FileWrite {
+            path: "$PROJECT/O_RDWR".to_string(),
+        }));
     }
 
     #[test]
