@@ -466,10 +466,17 @@ fn insert_file_behavior(
 ) {
     let path = path.to_string_lossy().into_owned();
 
-    let write = line.contains("O_WRONLY")
-        || line.contains("O_RDWR")
-        || line.contains("O_CREAT")
-        || line.contains("O_TRUNC");
+    if line.contains("O_RDWR") {
+        lock.insert_normalized(
+            Behavior::FileRead { path: path.clone() },
+            include_system,
+            context,
+        );
+        lock.insert_normalized(Behavior::FileWrite { path }, include_system, context);
+        return;
+    }
+
+    let write = line.contains("O_WRONLY") || line.contains("O_CREAT") || line.contains("O_TRUNC");
 
     let behavior = if write {
         Behavior::FileWrite { path }
@@ -880,6 +887,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_rdwr_as_read_and_write() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"openat(AT_FDCWD</project>, "data.txt", O_RDWR) = 3</project/data.txt>"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(lock.behaviors.len(), 2);
+        assert!(lock.behaviors.contains(&Behavior::FileRead {
+            path: "$PROJECT/data.txt".to_string(),
+        }));
+        assert!(lock.behaviors.contains(&Behavior::FileWrite {
+            path: "$PROJECT/data.txt".to_string(),
+        }));
+    }
+
+    #[test]
     fn decodes_strace_c_escapes() {
         let line = r#"openat(AT_FDCWD, "quote\"name\\tail\040space\012line", O_RDONLY) = 3"#;
 
@@ -1115,6 +1145,9 @@ mod tests {
         .unwrap();
 
         assert!(lock.behaviors.contains(&Behavior::FileWrite {
+            path: "$PROJECT/sub/write.txt".to_string(),
+        }));
+        assert!(!lock.behaviors.contains(&Behavior::FileRead {
             path: "$PROJECT/sub/write.txt".to_string(),
         }));
     }
