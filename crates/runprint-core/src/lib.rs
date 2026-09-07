@@ -319,10 +319,40 @@ fn normalize_runtime_path(raw: &str, context: &NormalizeContext) -> String {
     }
 
     if let Some(rel) = strip_prefix(&absolute, &context.temp) {
-        return symbolic("$TMP", rel);
+        let rel = normalize_temp_relative(rel);
+        return symbolic("$TMP", &rel);
     }
 
     absolute.to_string_lossy().into_owned()
+}
+
+fn normalize_temp_relative(rel: &Path) -> PathBuf {
+    let mut components = rel.components();
+
+    let Some(first) = components.next() else {
+        return rel.to_path_buf();
+    };
+
+    let first = first.as_os_str().to_string_lossy();
+    let first = normalize_volatile_temp_component(&first).unwrap_or(first.as_ref());
+
+    let mut normalized = PathBuf::from(first);
+
+    for component in components {
+        normalized.push(component.as_os_str());
+    }
+
+    normalized
+}
+
+fn normalize_volatile_temp_component(component: &str) -> Option<&'static str> {
+    let suffix = component.strip_prefix("rustdoctest")?;
+
+    if suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        Some("rustdoctest@volatile")
+    } else {
+        None
+    }
 }
 
 fn strip_prefix<'a>(path: &'a Path, base: &Path) -> Option<&'a Path> {
@@ -525,6 +555,42 @@ mod tests {
             Some(Behavior::FileWrite {
                 path: "$TMP/example.txt".into(),
             })
+        );
+    }
+
+    #[test]
+    fn rustdoctest_temp_instance_is_canonicalized() {
+        assert_eq!(
+            normalize_runtime_path("/tmp/rustdoctestRuFt9q/rustdoc-cfgs", &context()),
+            "$TMP/rustdoctest@volatile/rustdoc-cfgs"
+        );
+
+        assert_eq!(
+            normalize_runtime_path("/tmp/rustdoctestaPg4Uu/rustdoc-cfgs", &context()),
+            "$TMP/rustdoctest@volatile/rustdoc-cfgs"
+        );
+
+        assert_eq!(
+            normalize_runtime_path("/tmp/rustdoctestRuFt9q", &context()),
+            "$TMP/rustdoctest@volatile"
+        );
+    }
+
+    #[test]
+    fn similar_temp_names_are_not_over_normalized() {
+        assert_eq!(
+            normalize_runtime_path("/tmp/rustdoctest-cache/rustdoc-cfgs", &context()),
+            "$TMP/rustdoctest-cache/rustdoc-cfgs"
+        );
+
+        assert_eq!(
+            normalize_runtime_path("/tmp/rustdoctest/rustdoc-cfgs", &context()),
+            "$TMP/rustdoctest/rustdoc-cfgs"
+        );
+
+        assert_eq!(
+            normalize_runtime_path("/tmp/rustdoctest12345/rustdoc-cfgs", &context()),
+            "$TMP/rustdoctest12345/rustdoc-cfgs"
         );
     }
 

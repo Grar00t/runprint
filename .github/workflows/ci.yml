@@ -35,6 +35,9 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Cargo determinism matrix
+        run: bash tests/cargo_determinism_matrix.sh ./target/release/runprint
+
       - name: Exit verdict matrix
         run: bash tests/exit_status_matrix.sh ./target/release/runprint
 
