@@ -23,6 +23,16 @@ pub struct GatePolicy {
     pub allow_link: Vec<String>,
     pub allow_network: Vec<String>,
     pub allow_unix: Vec<String>,
+
+    pub deny_read: Vec<String>,
+    pub deny_exec: Vec<String>,
+    pub deny_write: Vec<String>,
+    pub deny_delete: Vec<String>,
+    pub deny_rename: Vec<String>,
+    pub deny_directory: Vec<String>,
+    pub deny_link: Vec<String>,
+    pub deny_network: Vec<String>,
+    pub deny_unix: Vec<String>,
 }
 
 impl Default for GatePolicy {
@@ -47,6 +57,16 @@ impl Default for GatePolicy {
             allow_link: Vec::new(),
             allow_network: Vec::new(),
             allow_unix: Vec::new(),
+
+            deny_read: Vec::new(),
+            deny_exec: Vec::new(),
+            deny_write: Vec::new(),
+            deny_delete: Vec::new(),
+            deny_rename: Vec::new(),
+            deny_directory: Vec::new(),
+            deny_link: Vec::new(),
+            deny_network: Vec::new(),
+            deny_unix: Vec::new(),
         }
     }
 }
@@ -64,14 +84,54 @@ pub fn evaluate_gate(
 ) -> GateResult {
     let violations = observed
         .behaviors
-        .difference(&baseline.behaviors)
-        .filter(|behavior| !allows_new_behavior(policy, behavior))
+        .iter()
+        .filter(|behavior| {
+            if explicitly_denied(policy, behavior) {
+                return true;
+            }
+
+            if baseline.behaviors.contains(*behavior) {
+                return false;
+            }
+
+            !allows_new_behavior(policy, behavior)
+        })
         .cloned()
         .collect::<Vec<_>>();
 
     GateResult {
         allowed: violations.is_empty(),
         violations,
+    }
+}
+
+fn explicitly_denied(policy: &GatePolicy, behavior: &Behavior) -> bool {
+    match behavior {
+        Behavior::Exec { path } => matches_any(path, &policy.deny_exec),
+
+        Behavior::FileRead { path } => matches_any(path, &policy.deny_read),
+
+        Behavior::FileWrite { path } => matches_any(path, &policy.deny_write),
+
+        Behavior::FileDelete { path } => matches_any(path, &policy.deny_delete),
+
+        Behavior::FileRename { from, to } => {
+            matches_any(from, &policy.deny_rename) || matches_any(to, &policy.deny_rename)
+        }
+
+        Behavior::DirectoryCreate { path } | Behavior::DirectoryDelete { path } => {
+            matches_any(path, &policy.deny_directory)
+        }
+
+        Behavior::SymlinkCreate { link, .. } => matches_any(link, &policy.deny_link),
+
+        Behavior::HardlinkCreate { from, to } => {
+            matches_any(from, &policy.deny_link) || matches_any(to, &policy.deny_link)
+        }
+
+        Behavior::NetworkConnect { address } => matches_any(address, &policy.deny_network),
+
+        Behavior::UnixConnect { path } => matches_any(path, &policy.deny_unix),
     }
 }
 
@@ -236,6 +296,48 @@ mod tests {
         let result = evaluate_gate(&baseline, &observed, &policy);
 
         assert!(result.allowed);
+    }
+
+    #[test]
+    fn explicit_deny_overrides_baseline() {
+        let mut baseline = BehaviorLock::new();
+
+        baseline.insert(Behavior::FileRead {
+            path: "$PROJECT/secret.txt".into(),
+        });
+
+        let observed = baseline.clone();
+
+        let policy = GatePolicy {
+            deny_read: vec!["$PROJECT/secret.txt".into()],
+            ..GatePolicy::default()
+        };
+
+        let result = evaluate_gate(&baseline, &observed, &policy);
+
+        assert!(!result.allowed);
+        assert_eq!(result.violations.len(), 1);
+    }
+
+    #[test]
+    fn explicit_network_deny_overrides_global_allow() {
+        let baseline = BehaviorLock::new();
+
+        let mut observed = BehaviorLock::new();
+        observed.insert(Behavior::NetworkConnect {
+            address: "169.254.169.254:80".into(),
+        });
+
+        let policy = GatePolicy {
+            allow_new_network: true,
+            deny_network: vec!["169.254.169.254:*".into()],
+            ..GatePolicy::default()
+        };
+
+        let result = evaluate_gate(&baseline, &observed, &policy);
+
+        assert!(!result.allowed);
+        assert_eq!(result.violations.len(), 1);
     }
 
     #[test]
