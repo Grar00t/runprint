@@ -2,7 +2,7 @@ mod trace;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use runprint_core::{diff, Behavior, BehaviorLock};
+use runprint_core::{diff, gate::evaluate_gate, Behavior, BehaviorLock};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -34,6 +34,17 @@ enum Commands {
     },
 
     Check {
+        #[arg(short, long, default_value = "behavior.lock")]
+        baseline: PathBuf,
+
+        #[arg(long)]
+        include_system: bool,
+
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+
+    Gate {
         #[arg(short, long, default_value = "behavior.lock")]
         baseline: PathBuf,
 
@@ -102,6 +113,44 @@ fn main() -> Result<()> {
             for item in &d.removed {
                 println!("- {}", render(item));
             }
+        }
+
+        Commands::Gate {
+            baseline,
+            include_system,
+            command,
+        } => {
+            let baseline = load(&baseline)?;
+            let run = trace::record(&command, include_system)?;
+            let result = evaluate_gate(&baseline, &run.lock);
+
+            println!();
+            println!("Runprint Gate");
+            println!();
+
+            if result.allowed {
+                println!("ALLOW");
+                println!("no restricted runtime drift");
+
+                if run.exit_code != 0 {
+                    eprintln!("command exited with {}", run.exit_code);
+                    std::process::exit(run.exit_code);
+                }
+
+                return Ok(());
+            }
+
+            println!("DENY");
+            println!();
+
+            for violation in &result.violations {
+                println!("! {}", render(violation));
+            }
+
+            println!();
+            println!("violations {}", result.violations.len());
+
+            std::process::exit(20);
         }
 
         Commands::Check {

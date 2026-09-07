@@ -1,3 +1,5 @@
+pub mod gate;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
