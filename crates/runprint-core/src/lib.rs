@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -9,6 +12,23 @@ pub enum Behavior {
     FileWrite { path: String },
     NetworkConnect { address: String },
     UnixConnect { path: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct NormalizeContext {
+    pub project_root: PathBuf,
+    pub home: Option<PathBuf>,
+    pub temp: PathBuf,
+}
+
+impl NormalizeContext {
+    pub fn new(project_root: PathBuf, home: Option<PathBuf>, temp: PathBuf) -> Self {
+        Self {
+            project_root,
+            home,
+            temp,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,8 +64,13 @@ impl BehaviorLock {
         self.behaviors.insert(behavior);
     }
 
-    pub fn insert_normalized(&mut self, behavior: Behavior, include_system: bool) {
-        if let Some(behavior) = normalize_behavior(behavior, include_system) {
+    pub fn insert_normalized(
+        &mut self,
+        behavior: Behavior,
+        include_system: bool,
+        context: &NormalizeContext,
+    ) {
+        if let Some(behavior) = normalize_behavior(behavior, include_system, context) {
             self.insert(behavior);
         }
     }
@@ -95,10 +120,14 @@ pub fn diff(old: &BehaviorLock, new: &BehaviorLock) -> BehaviorDiff {
     }
 }
 
-pub fn normalize_behavior(behavior: Behavior, include_system: bool) -> Option<Behavior> {
+pub fn normalize_behavior(
+    behavior: Behavior,
+    include_system: bool,
+    context: &NormalizeContext,
+) -> Option<Behavior> {
     match behavior {
         Behavior::FileRead { path } => {
-            let path = normalize_path(&path);
+            let path = normalize_runtime_path(&path, context);
 
             if !include_system && is_runtime_noise(&path) {
                 return None;
@@ -108,15 +137,15 @@ pub fn normalize_behavior(behavior: Behavior, include_system: bool) -> Option<Be
         }
 
         Behavior::FileWrite { path } => Some(Behavior::FileWrite {
-            path: normalize_path(&path),
+            path: normalize_runtime_path(&path, context),
         }),
 
         Behavior::Exec { path } => Some(Behavior::Exec {
-            path: normalize_path(&path),
+            path: normalize_runtime_path(&path, context),
         }),
 
         Behavior::UnixConnect { path } => {
-            let path = normalize_path(&path);
+            let path = normalize_runtime_path(&path, context);
 
             if !include_system && is_runtime_socket_noise(&path) {
                 return None;
@@ -129,18 +158,83 @@ pub fn normalize_behavior(behavior: Behavior, include_system: bool) -> Option<Be
     }
 }
 
-fn normalize_path(path: &str) -> String {
-    let mut value = path.replace("//", "/");
+fn normalize_runtime_path(raw: &str, context: &NormalizeContext) -> String {
+    let raw = lexical_clean(raw);
 
-    while value.contains("/./") {
-        value = value.replace("/./", "/");
+    if raw == "." {
+        return "$PROJECT".into();
     }
 
-    if value.ends_with("/.") && value.len() > 2 {
-        value.truncate(value.len() - 2);
+    let path = PathBuf::from(&raw);
+
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        context.project_root.join(path)
+    };
+
+    let absolute = PathBuf::from(lexical_clean(&absolute.to_string_lossy()));
+
+    if let Some(rel) = strip_prefix(&absolute, &context.project_root) {
+        return symbolic("$PROJECT", rel);
     }
 
-    value
+    if let Some(home) = &context.home {
+        if let Some(rel) = strip_prefix(&absolute, home) {
+            return symbolic("$HOME", rel);
+        }
+    }
+
+    if let Some(rel) = strip_prefix(&absolute, &context.temp) {
+        return symbolic("$TMP", rel);
+    }
+
+    absolute.to_string_lossy().into_owned()
+}
+
+fn strip_prefix<'a>(path: &'a Path, base: &Path) -> Option<&'a Path> {
+    path.strip_prefix(base).ok()
+}
+
+fn symbolic(prefix: &str, rel: &Path) -> String {
+    if rel.as_os_str().is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}/{}", rel.to_string_lossy())
+    }
+}
+
+fn lexical_clean(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.last().copied() != Some("..") && !parts.is_empty() {
+                    parts.pop();
+                } else if !absolute {
+                    parts.push("..");
+                }
+            }
+            _ => parts.push(part),
+        }
+    }
+
+    let joined = parts.join("/");
+
+    if absolute {
+        if joined.is_empty() {
+            "/".into()
+        } else {
+            format!("/{joined}")
+        }
+    } else if joined.is_empty() {
+        ".".into()
+    } else {
+        joined
+    }
 }
 
 fn is_runtime_noise(path: &str) -> bool {
@@ -175,6 +269,14 @@ fn is_runtime_socket_noise(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context() -> NormalizeContext {
+        NormalizeContext::new(
+            PathBuf::from("/home/test/project"),
+            Some(PathBuf::from("/home/test")),
+            PathBuf::from("/tmp"),
+        )
+    }
 
     #[test]
     fn behavior_is_deduplicated() {
@@ -213,7 +315,7 @@ mod tests {
             path: "/usr/lib/x86_64-linux-gnu/libc.so.6".into(),
         };
 
-        assert_eq!(normalize_behavior(behavior, false), None);
+        assert_eq!(normalize_behavior(behavior, false, &context()), None);
     }
 
     #[test]
@@ -222,7 +324,7 @@ mod tests {
             path: "/etc/ld.so.cache".into(),
         };
 
-        assert!(normalize_behavior(behavior, true).is_some());
+        assert!(normalize_behavior(behavior, true, &context()).is_some());
     }
 
     #[test]
@@ -231,6 +333,62 @@ mod tests {
             path: "/usr/lib/example.so".into(),
         };
 
-        assert!(normalize_behavior(behavior, false).is_some());
+        assert!(normalize_behavior(behavior, false, &context()).is_some());
+    }
+
+    #[test]
+    fn project_path_is_portable() {
+        let behavior = Behavior::FileRead {
+            path: "/home/test/project/src/main.rs".into(),
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::FileRead {
+                path: "$PROJECT/src/main.rs".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn home_path_is_portable() {
+        let behavior = Behavior::FileWrite {
+            path: "/home/test/.config/example/id".into(),
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::FileWrite {
+                path: "$HOME/.config/example/id".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn temp_path_is_portable() {
+        let behavior = Behavior::FileWrite {
+            path: "/tmp/example.txt".into(),
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::FileWrite {
+                path: "$TMP/example.txt".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn relative_path_becomes_project_path() {
+        let behavior = Behavior::FileRead {
+            path: "src/lib.rs".into(),
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::FileRead {
+                path: "$PROJECT/src/lib.rs".into(),
+            })
+        );
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use runprint_core::{diff, Behavior, BehaviorLock};
+use runprint_core::{diff, Behavior, BehaviorLock, NormalizeContext};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -124,6 +124,12 @@ fn record(command: &[String], include_system: bool) -> Result<BehaviorLock> {
         bail!("missing command");
     }
 
+    let project_root = std::env::current_dir().context("failed to determine current directory")?;
+
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    let normalize_context = NormalizeContext::new(project_root, home, std::env::temp_dir());
+
     let dir = tempfile::tempdir()?;
     let prefix = dir.path().join("trace");
 
@@ -144,10 +150,14 @@ fn record(command: &[String], include_system: bool) -> Result<BehaviorLock> {
         eprintln!("command exited with {status}");
     }
 
-    parse_trace_dir(dir.path(), include_system)
+    parse_trace_dir(dir.path(), include_system, &normalize_context)
 }
 
-fn parse_trace_dir(dir: &Path, include_system: bool) -> Result<BehaviorLock> {
+fn parse_trace_dir(
+    dir: &Path,
+    include_system: bool,
+    normalize_context: &NormalizeContext,
+) -> Result<BehaviorLock> {
     let mut lock = BehaviorLock::new();
 
     let mut entries = fs::read_dir(dir)?.collect::<std::io::Result<Vec<_>>>()?;
@@ -158,21 +168,26 @@ fn parse_trace_dir(dir: &Path, include_system: bool) -> Result<BehaviorLock> {
         let text = fs::read_to_string(entry.path())?;
 
         for line in text.lines() {
-            parse_line(line, &mut lock, include_system);
+            parse_line(line, &mut lock, include_system, normalize_context);
         }
     }
 
     Ok(lock)
 }
 
-fn parse_line(line: &str, lock: &mut BehaviorLock, include_system: bool) {
+fn parse_line(
+    line: &str,
+    lock: &mut BehaviorLock,
+    include_system: bool,
+    normalize_context: &NormalizeContext,
+) {
     if line.starts_with("execve(") {
         if syscall_failed(line) {
             return;
         }
 
         if let Some(path) = first_quoted_string(line) {
-            lock.insert_normalized(Behavior::Exec { path }, include_system);
+            lock.insert_normalized(Behavior::Exec { path }, include_system, normalize_context);
         }
 
         return;
@@ -195,7 +210,7 @@ fn parse_line(line: &str, lock: &mut BehaviorLock, include_system: bool) {
                 Behavior::FileRead { path }
             };
 
-            lock.insert_normalized(behavior, include_system);
+            lock.insert_normalized(behavior, include_system, normalize_context);
         }
 
         return;
@@ -203,7 +218,7 @@ fn parse_line(line: &str, lock: &mut BehaviorLock, include_system: bool) {
 
     if line.starts_with("connect(") {
         if let Some(behavior) = parse_connect(line) {
-            lock.insert_normalized(behavior, include_system);
+            lock.insert_normalized(behavior, include_system, normalize_context);
         }
     }
 }
