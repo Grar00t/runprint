@@ -294,8 +294,23 @@ fn save(path: &Path, lock: &BehaviorLock) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+struct BehaviorLockHeader {
+    version: u32,
+}
+
+fn parse_lock(raw: &[u8]) -> Result<BehaviorLock> {
+    let header: BehaviorLockHeader = serde_json::from_slice(raw)?;
+
+    if !BehaviorLock::is_supported_version(header.version) {
+        anyhow::bail!("unsupported behavior lock version {}", header.version);
+    }
+
+    Ok(serde_json::from_slice(raw)?)
+}
+
 fn load(path: &Path) -> Result<BehaviorLock> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    parse_lock(&fs::read(path)?)
 }
 
 fn render(item: &Behavior) -> String {
@@ -324,6 +339,49 @@ fn render(item: &Behavior) -> String {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn lock_loader_accepts_legacy_v1() {
+        let raw = br#"{
+            "version": 1,
+            "behaviors": []
+        }"#;
+
+        let lock = parse_lock(raw).unwrap();
+
+        assert_eq!(lock.version, 1);
+        assert!(lock.behaviors.is_empty());
+    }
+
+    #[test]
+    fn lock_loader_accepts_current_v2() {
+        let raw = br#"{
+            "version": 2,
+            "behaviors": []
+        }"#;
+
+        let lock = parse_lock(raw).unwrap();
+
+        assert_eq!(lock.version, 2);
+        assert!(lock.behaviors.is_empty());
+    }
+
+    #[test]
+    fn lock_loader_rejects_future_version_before_behavior_decode() {
+        let raw = br#"{
+            "version": 3,
+            "behaviors": [
+                {
+                    "kind": "future_behavior_that_this_binary_does_not_know",
+                    "value": "x"
+                }
+            ]
+        }"#;
+
+        let error = parse_lock(raw).unwrap_err();
+
+        assert_eq!(error.to_string(), "unsupported behavior lock version 3");
+    }
 
     #[test]
     fn config_rejects_unknown_gate_key() {

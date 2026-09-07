@@ -6,6 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const BEHAVIOR_LOCK_MIN_SUPPORTED_VERSION: u32 = 1;
+pub const BEHAVIOR_LOCK_CURRENT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Behavior {
@@ -82,9 +85,13 @@ impl BehaviorCounts {
 impl BehaviorLock {
     pub fn new() -> Self {
         Self {
-            version: 1,
+            version: BEHAVIOR_LOCK_CURRENT_VERSION,
             behaviors: BTreeSet::new(),
         }
+    }
+
+    pub fn is_supported_version(version: u32) -> bool {
+        (BEHAVIOR_LOCK_MIN_SUPPORTED_VERSION..=BEHAVIOR_LOCK_CURRENT_VERSION).contains(&version)
     }
 
     pub fn insert(&mut self, behavior: Behavior) {
@@ -352,6 +359,19 @@ mod tests {
             Some(PathBuf::from("/home/test")),
             PathBuf::from("/tmp"),
         )
+    }
+
+    #[test]
+    fn new_lock_uses_current_schema_version() {
+        assert_eq!(BehaviorLock::new().version, BEHAVIOR_LOCK_CURRENT_VERSION);
+    }
+
+    #[test]
+    fn lock_schema_support_range_is_explicit() {
+        assert!(!BehaviorLock::is_supported_version(0));
+        assert!(BehaviorLock::is_supported_version(1));
+        assert!(BehaviorLock::is_supported_version(2));
+        assert!(!BehaviorLock::is_supported_version(3));
     }
 
     #[test]
