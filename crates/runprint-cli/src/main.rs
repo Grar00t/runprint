@@ -1,3 +1,4 @@
+mod enforce;
 mod trace;
 
 use anyhow::Result;
@@ -44,6 +45,14 @@ enum Commands {
 
         #[arg(long)]
         include_system: bool,
+
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+
+    Enforce {
+        #[arg(long)]
+        config: Option<PathBuf>,
 
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
@@ -120,6 +129,24 @@ fn main() -> Result<()> {
 
             for item in &d.removed {
                 println!("- {}", render(item));
+            }
+        }
+
+        Commands::Enforce { config, command } => {
+            let config = load_config(config.as_deref())?;
+
+            println!();
+            println!("Runprint Enforce");
+            println!();
+            println!("backend    landlock");
+            println!("write roots {}", config.enforce.write.len());
+
+            let exit_code = enforce::run(&command, &config.enforce)?;
+
+            println!("exit       {exit_code}");
+
+            if exit_code != 0 {
+                std::process::exit(exit_code);
             }
         }
 
@@ -210,6 +237,9 @@ struct RunprintConfig {
 
     #[serde(default)]
     gate: GatePolicy,
+
+    #[serde(default)]
+    enforce: enforce::EnforcePolicy,
 }
 
 impl Default for RunprintConfig {
@@ -217,11 +247,16 @@ impl Default for RunprintConfig {
         Self {
             version: 1,
             gate: GatePolicy::default(),
+            enforce: enforce::EnforcePolicy::default(),
         }
     }
 }
 
 fn load_gate_policy(explicit: Option<&Path>) -> Result<GatePolicy> {
+    Ok(load_config(explicit)?.gate)
+}
+
+fn load_config(explicit: Option<&Path>) -> Result<RunprintConfig> {
     let default_path = Path::new(".runprint.toml");
     let path = explicit.unwrap_or(default_path);
 
@@ -230,7 +265,7 @@ fn load_gate_policy(explicit: Option<&Path>) -> Result<GatePolicy> {
             anyhow::bail!("config not found: {}", path.display());
         }
 
-        return Ok(GatePolicy::default());
+        return Ok(RunprintConfig::default());
     }
 
     let raw = fs::read_to_string(path)?;
@@ -244,7 +279,7 @@ fn load_gate_policy(explicit: Option<&Path>) -> Result<GatePolicy> {
         );
     }
 
-    Ok(config.gate)
+    Ok(config)
 }
 
 fn save(path: &Path, lock: &BehaviorLock) -> Result<()> {

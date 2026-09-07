@@ -1,0 +1,186 @@
+use anyhow::{bail, Context, Result};
+use landlock::{
+    make_bitflags, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
+    RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+};
+use serde::Deserialize;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct EnforcePolicy {
+    pub write: Vec<String>,
+}
+
+pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
+    if command.is_empty() {
+        bail!("missing command");
+    }
+
+    let project_root = env::current_dir().context("failed to determine current directory")?;
+
+    apply_write_policy(policy, &project_root)?;
+
+    let status = Command::new(&command[0])
+        .args(&command[1..])
+        .status()
+        .with_context(|| format!("failed to execute {}", command[0]))?;
+
+    Ok(status.code().unwrap_or(128))
+}
+
+fn apply_write_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
+    let mut ruleset = Ruleset::default()
+        .set_compatibility(CompatLevel::HardRequirement)
+        .handle_access(write_access())?
+        .create()?;
+
+    for pattern in &policy.write {
+        let (path, recursive) = resolve_write_rule(pattern, project_root)?;
+
+        let access = if recursive {
+            write_access()
+        } else {
+            file_write_access()
+        };
+
+        let fd = PathFd::new(&path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to open enforcement path {}: {error}",
+                path.display()
+            )
+        })?;
+
+        ruleset = ruleset.add_rule(PathBeneath::new(fd, access))?;
+    }
+
+    let status = ruleset.restrict_self()?;
+
+    if status.ruleset != RulesetStatus::FullyEnforced || !status.no_new_privs {
+        bail!(
+            "Landlock enforcement is not fully active: ruleset={:?}, no_new_privs={}",
+            status.ruleset,
+            status.no_new_privs
+        );
+    }
+
+    Ok(())
+}
+
+fn write_access() -> BitFlags<AccessFs> {
+    make_bitflags!(AccessFs::{
+        WriteFile
+        | RemoveDir
+        | RemoveFile
+        | MakeChar
+        | MakeDir
+        | MakeReg
+        | MakeSock
+        | MakeFifo
+        | MakeBlock
+        | MakeSym
+        | Refer
+        | Truncate
+    })
+}
+
+fn file_write_access() -> BitFlags<AccessFs> {
+    make_bitflags!(AccessFs::{WriteFile | Truncate})
+}
+
+fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bool)> {
+    let (raw, recursive) = match pattern.strip_suffix("/**") {
+        Some("") => ("/", true),
+        Some(base) => (base, true),
+        None => (pattern, false),
+    };
+
+    if raw.contains('*') {
+        bail!("unsupported enforcement wildcard in {pattern}; only /** is supported");
+    }
+
+    let expanded = expand_path(raw, project_root)?;
+    let canonical = fs::canonicalize(&expanded)
+        .with_context(|| format!("enforcement path does not exist: {}", expanded.display()))?;
+
+    let metadata = fs::metadata(&canonical)?;
+
+    if recursive {
+        if !metadata.is_dir() {
+            bail!(
+                "recursive enforcement path is not a directory: {}",
+                canonical.display()
+            );
+        }
+    } else if metadata.is_dir() {
+        bail!("directory enforcement paths must end with /**: {}", pattern);
+    }
+
+    Ok((canonical, recursive))
+}
+
+fn expand_path(raw: &str, project_root: &Path) -> Result<PathBuf> {
+    if let Some(path) = expand_prefix(raw, "$PROJECT", project_root) {
+        return Ok(path);
+    }
+
+    if raw == "$HOME" || raw.starts_with("$HOME/") {
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+
+        return expand_prefix(raw, "$HOME", &home)
+            .ok_or_else(|| anyhow::anyhow!("invalid $HOME path: {raw}"));
+    }
+
+    if raw == "$TMP" || raw.starts_with("$TMP/") {
+        let temp = env::temp_dir();
+
+        return expand_prefix(raw, "$TMP", &temp)
+            .ok_or_else(|| anyhow::anyhow!("invalid $TMP path: {raw}"));
+    }
+
+    if raw.starts_with('$') {
+        bail!("unsupported enforcement path variable: {raw}");
+    }
+
+    let path = PathBuf::from(raw);
+
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(project_root.join(path))
+    }
+}
+
+fn expand_prefix(raw: &str, token: &str, base: &Path) -> Option<PathBuf> {
+    if raw == token {
+        return Some(base.to_path_buf());
+    }
+
+    let rest = raw.strip_prefix(token)?.strip_prefix('/')?;
+
+    Some(base.join(rest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_prefix_expands() {
+        assert_eq!(
+            expand_path("$PROJECT/dist", Path::new("/home/test/project")).unwrap(),
+            PathBuf::from("/home/test/project/dist")
+        );
+    }
+
+    #[test]
+    fn unknown_variable_is_rejected() {
+        assert!(expand_path("$UNKNOWN/file", Path::new("/project")).is_err());
+    }
+}

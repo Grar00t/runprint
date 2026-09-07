@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive"] }
 blake3 = "1"
 tempfile = "3"
 toml = "0.8"
+landlock = "0.4.7"
 
 [profile.release]
 opt-level = 3
