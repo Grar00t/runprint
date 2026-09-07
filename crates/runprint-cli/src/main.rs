@@ -67,6 +67,8 @@ fn main() -> Result<()> {
             println!("file write {}", counts.file_write);
             println!("delete     {}", counts.file_delete);
             println!("rename     {}", counts.file_rename);
+            println!("mkdir      {}", counts.directory_create);
+            println!("rmdir      {}", counts.directory_delete);
             println!("network    {}", counts.network);
             println!("unix       {}", counts.unix);
             println!("-----------");
@@ -156,6 +158,8 @@ fn render(item: &Behavior) -> String {
         Behavior::FileWrite { path } => format!("write    {path}"),
         Behavior::FileDelete { path } => format!("delete   {path}"),
         Behavior::FileRename { from, to } => format!("rename   {from} -> {to}"),
+        Behavior::DirectoryCreate { path } => format!("mkdir    {path}"),
+        Behavior::DirectoryDelete { path } => format!("rmdir    {path}"),
         Behavior::NetworkConnect { address } => format!("connect  {address}"),
         Behavior::UnixConnect { path } => format!("ipc      {path}"),
     }

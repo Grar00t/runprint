@@ -211,11 +211,43 @@ fn parse_behavior_line(
         return Ok(());
     }
 
-    if line.starts_with("unlink(") || line.starts_with("rmdir(") {
+    if line.starts_with("unlink(") {
         if let Some(raw) = first_quoted_string(line) {
             let path = resolve_path(cwd, &raw).to_string_lossy().into_owned();
 
             lock.insert_normalized(Behavior::FileDelete { path }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("rmdir(") {
+        if let Some(raw) = first_quoted_string(line) {
+            let path = resolve_path(cwd, &raw).to_string_lossy().into_owned();
+
+            lock.insert_normalized(Behavior::DirectoryDelete { path }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("mkdir(") {
+        if let Some(raw) = first_quoted_string(line) {
+            let path = resolve_path(cwd, &raw).to_string_lossy().into_owned();
+
+            lock.insert_normalized(Behavior::DirectoryCreate { path }, include_system, context);
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("mkdirat(") {
+        if let Some(raw) = first_quoted_string(line) {
+            let path = resolve_openat(line, cwd, &raw)?
+                .to_string_lossy()
+                .into_owned();
+
+            lock.insert_normalized(Behavior::DirectoryCreate { path }, include_system, context);
         }
 
         return Ok(());
@@ -227,7 +259,13 @@ fn parse_behavior_line(
                 .to_string_lossy()
                 .into_owned();
 
-            lock.insert_normalized(Behavior::FileDelete { path }, include_system, context);
+            let behavior = if line.contains("AT_REMOVEDIR") {
+                Behavior::DirectoryDelete { path }
+            } else {
+                Behavior::FileDelete { path }
+            };
+
+            lock.insert_normalized(behavior, include_system, context);
         }
 
         return Ok(());

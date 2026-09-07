@@ -12,6 +12,8 @@ pub enum Behavior {
     FileWrite { path: String },
     FileDelete { path: String },
     FileRename { from: String, to: String },
+    DirectoryCreate { path: String },
+    DirectoryDelete { path: String },
     NetworkConnect { address: String },
     UnixConnect { path: String },
 }
@@ -46,6 +48,8 @@ pub struct BehaviorCounts {
     pub file_write: usize,
     pub file_delete: usize,
     pub file_rename: usize,
+    pub directory_create: usize,
+    pub directory_delete: usize,
     pub network: usize,
     pub unix: usize,
 }
@@ -57,6 +61,8 @@ impl BehaviorCounts {
             + self.file_write
             + self.file_delete
             + self.file_rename
+            + self.directory_create
+            + self.directory_delete
             + self.network
             + self.unix
     }
@@ -95,6 +101,8 @@ impl BehaviorLock {
                 Behavior::FileWrite { .. } => counts.file_write += 1,
                 Behavior::FileDelete { .. } => counts.file_delete += 1,
                 Behavior::FileRename { .. } => counts.file_rename += 1,
+                Behavior::DirectoryCreate { .. } => counts.directory_create += 1,
+                Behavior::DirectoryDelete { .. } => counts.directory_delete += 1,
                 Behavior::NetworkConnect { .. } => counts.network += 1,
                 Behavior::UnixConnect { .. } => counts.unix += 1,
             }
@@ -159,6 +167,14 @@ pub fn normalize_behavior(
         Behavior::FileRename { from, to } => Some(Behavior::FileRename {
             from: normalize_runtime_path(&from, context),
             to: normalize_runtime_path(&to, context),
+        }),
+
+        Behavior::DirectoryCreate { path } => Some(Behavior::DirectoryCreate {
+            path: normalize_runtime_path(&path, context),
+        }),
+
+        Behavior::DirectoryDelete { path } => Some(Behavior::DirectoryDelete {
+            path: normalize_runtime_path(&path, context),
         }),
 
         Behavior::Exec { path } => Some(Behavior::Exec {
