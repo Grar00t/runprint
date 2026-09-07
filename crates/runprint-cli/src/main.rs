@@ -141,6 +141,8 @@ fn main() -> Result<()> {
             println!("backend      landlock");
             println!("write roots  {}", config.enforce.write.len());
             println!("modify roots {}", config.enforce.modify.len());
+            println!("create roots {}", config.enforce.create.len());
+            println!("remove roots {}", config.enforce.remove.len());
 
             let exit_code = enforce::run(&command, &config.enforce)?;
 

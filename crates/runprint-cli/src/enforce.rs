@@ -20,6 +20,13 @@ pub struct EnforcePolicy {
     /// Narrow permission for modifying existing regular files only.
     /// Does not allow creating or deleting filesystem entries.
     pub modify: Vec<String>,
+
+    /// Permission to create filesystem entries beneath a directory.
+    /// This grants Landlock MAKE_* rights only.
+    pub create: Vec<String>,
+
+    /// Permission to remove filesystem entries beneath a directory.
+    pub remove: Vec<String>,
 }
 
 pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
@@ -63,6 +70,28 @@ fn apply_filesystem_policy(policy: &EnforcePolicy, project_root: &Path) -> Resul
         let (path, _) = resolve_write_rule(pattern, project_root)?;
 
         ruleset = add_path_rule(ruleset, &path, file_write_access())?;
+    }
+
+    // Filesystem entry creation roots.
+    for pattern in &policy.create {
+        let (path, recursive) = resolve_write_rule(pattern, project_root)?;
+
+        if !recursive {
+            bail!("create enforcement roots must be directories ending with /**: {pattern}");
+        }
+
+        ruleset = add_path_rule(ruleset, &path, create_access())?;
+    }
+
+    // Filesystem entry removal roots.
+    for pattern in &policy.remove {
+        let (path, recursive) = resolve_write_rule(pattern, project_root)?;
+
+        if !recursive {
+            bail!("remove enforcement roots must be directories ending with /**: {pattern}");
+        }
+
+        ruleset = add_path_rule(ruleset, &path, remove_access())?;
     }
 
     let status = ruleset.restrict_self()?;
@@ -112,6 +141,22 @@ fn write_access() -> BitFlags<AccessFs> {
 
 fn file_write_access() -> BitFlags<AccessFs> {
     make_bitflags!(AccessFs::{WriteFile | Truncate})
+}
+
+fn create_access() -> BitFlags<AccessFs> {
+    make_bitflags!(AccessFs::{
+        MakeChar
+        | MakeDir
+        | MakeReg
+        | MakeSock
+        | MakeFifo
+        | MakeBlock
+        | MakeSym
+    })
+}
+
+fn remove_access() -> BitFlags<AccessFs> {
+    make_bitflags!(AccessFs::{RemoveDir | RemoveFile})
 }
 
 fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bool)> {
