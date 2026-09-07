@@ -576,7 +576,7 @@ fn nth_quoted_string(line: &str, wanted: usize) -> Option<String> {
                 in_quote = true;
             } else {
                 if index == wanted {
-                    return Some(line[start..pos].to_string());
+                    return Some(decode_strace_string(&line[start..pos]));
                 }
 
                 index += 1;
@@ -586,6 +586,121 @@ fn nth_quoted_string(line: &str, wanted: usize) -> Option<String> {
     }
 
     None
+}
+
+fn decode_strace_string(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        let escape_start = index;
+        index += 1;
+
+        if index >= bytes.len() {
+            out.push(b'\\');
+            break;
+        }
+
+        match bytes[index] {
+            b'\\' => {
+                out.push(b'\\');
+                index += 1;
+            }
+            b'"' => {
+                out.push(b'"');
+                index += 1;
+            }
+            b'\'' => {
+                out.push(b'\'');
+                index += 1;
+            }
+            b'a' => {
+                out.push(0x07);
+                index += 1;
+            }
+            b'b' => {
+                out.push(0x08);
+                index += 1;
+            }
+            b'f' => {
+                out.push(0x0c);
+                index += 1;
+            }
+            b'n' => {
+                out.push(b'\n');
+                index += 1;
+            }
+            b'r' => {
+                out.push(b'\r');
+                index += 1;
+            }
+            b't' => {
+                out.push(b'\t');
+                index += 1;
+            }
+            b'v' => {
+                out.push(0x0b);
+                index += 1;
+            }
+            b'x' => {
+                if index + 2 < bytes.len() {
+                    if let (Some(high), Some(low)) =
+                        (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+                    {
+                        out.push((high << 4) | low);
+                        index += 3;
+                        continue;
+                    }
+                }
+
+                out.extend_from_slice(&bytes[escape_start..=index]);
+                index += 1;
+            }
+            b'0'..=b'7' => {
+                let mut value = 0u16;
+                let mut digits = 0usize;
+
+                while index < bytes.len() && digits < 3 && matches!(bytes[index], b'0'..=b'7') {
+                    value = value * 8 + u16::from(bytes[index] - b'0');
+                    index += 1;
+                    digits += 1;
+                }
+
+                if value <= u16::from(u8::MAX) {
+                    out.push(value as u8);
+                } else {
+                    out.extend_from_slice(&bytes[escape_start..index]);
+                }
+            }
+            other => {
+                // Preserve unknown escapes instead of inventing semantics.
+                out.push(b'\\');
+                out.push(other);
+                index += 1;
+            }
+        }
+    }
+
+    match String::from_utf8(out) {
+        Ok(decoded) => decoded,
+        Err(_) => raw.to_string(),
+    }
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn quoted_end(line: &str, wanted: usize) -> Option<usize> {
@@ -671,6 +786,33 @@ mod tests {
         assert_eq!(
             resolve_openat(line, Path::new("/project/subdir"), "output.txt").unwrap(),
             PathBuf::from("/project/subdir/output.txt")
+        );
+    }
+
+    #[test]
+    fn decodes_strace_c_escapes() {
+        let line = r#"openat(AT_FDCWD, "quote\"name\\tail\040space\012line", O_RDONLY) = 3"#;
+
+        assert_eq!(
+            nth_quoted_string(line, 0).as_deref(),
+            Some("quote\"name\\tail space\nline")
+        );
+    }
+
+    #[test]
+    fn decodes_strace_octal_utf8() {
+        let line = r#"openat(AT_FDCWD, "caf\303\251.txt", O_RDONLY) = 3"#;
+
+        assert_eq!(nth_quoted_string(line, 0).as_deref(), Some("café.txt"));
+    }
+
+    #[test]
+    fn preserves_unknown_strace_escape() {
+        let line = r#"openat(AT_FDCWD, "odd\qname.txt", O_RDONLY) = 3"#;
+
+        assert_eq!(
+            nth_quoted_string(line, 0).as_deref(),
+            Some(r"odd\qname.txt")
         );
     }
 
