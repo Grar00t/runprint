@@ -1,3 +1,8 @@
+mod strace;
+
+#[cfg(test)]
+mod tests;
+
 use crate::status::shell_exit_code;
 use anyhow::{bail, Context, Result};
 use runprint_core::{Behavior, BehaviorLock, NormalizeContext};
@@ -8,9 +13,11 @@ use std::{
     process::Command,
 };
 
-const UNFINISHED_MARKER: &str = "<unfinished ...>";
-const RESUMED_MARKER: &str = " resumed>";
-const RESULT_MARKER: &str = ") = ";
+use self::strace::{
+    angle_path, extract_between, extract_strace_abstract_unix_address, extract_strace_quoted_field,
+    file_open_flags, first_quoted_string, flags_have_token, nth_quoted_string, observable_syscall,
+    quoted_end, reassemble_trace_lines, syscall_result, syscall_succeeded,
+};
 
 pub struct RecordedRun {
     pub lock: BehaviorLock,
@@ -90,7 +97,11 @@ fn parse_trace_dir(
         .collect();
 
     if roots.len() != 1 {
-        bail!("expected one root trace process, found {}", roots.len());
+        bail!(
+            "expected exactly one traced process without a recorded parent, found {}; \
+             the trace is incomplete and behavior cannot be attributed reliably",
+            roots.len()
+        );
     }
 
     let root = roots[0];
@@ -118,6 +129,8 @@ fn parse_trace_dir(
             .ok_or_else(|| anyhow::anyhow!("missing trace for pid {pid}"))?;
 
         for line in lines {
+            // Never infer an operation from syscall arguments when the
+            // reported result means it did not occur.
             if !observable_syscall(line) {
                 continue;
             }
@@ -180,104 +193,6 @@ fn load_traces(dir: &Path) -> Result<BTreeMap<u32, Vec<String>>> {
 fn trace_pid(path: &Path) -> Option<u32> {
     let name = path.file_name()?.to_str()?;
     name.strip_prefix("trace.")?.parse().ok()
-}
-
-/// strace splits a syscall that is interrupted mid-flight into an entry line
-/// ending in `<unfinished ...>` and a later `<... name resumed>` line that
-/// carries the real result. Neither half can be interpreted on its own, so the
-/// two halves are spliced back into a single line before any behavior is
-/// derived from them.
-///
-/// An entry half that never reports a result is dropped. Runprint must not
-/// record behavior that the kernel never confirmed.
-fn reassemble_trace_lines(text: &str) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut pending: Option<String> = None;
-
-    for line in text.lines() {
-        let line = line.trim_end();
-
-        if line.is_empty() {
-            continue;
-        }
-
-        // Signal deliveries and exit notices carry no syscall result.
-        if line.starts_with("---") || line.starts_with("+++") {
-            continue;
-        }
-
-        if let Some(head) = line.strip_suffix(UNFINISHED_MARKER) {
-            pending = Some(head.trim_end().to_string());
-            continue;
-        }
-
-        if let Some(tail) = resumed_tail(line) {
-            if let Some(head) = pending.take() {
-                lines.push(format!("{head}{tail}"));
-            }
-
-            continue;
-        }
-
-        lines.push(line.to_string());
-    }
-
-    lines
-}
-
-fn resumed_tail(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("<... ")?;
-    let end = rest.find(RESUMED_MARKER)?;
-
-    Some(&rest[end + RESUMED_MARKER.len()..])
-}
-
-/// The text strace printed after the syscall's closing `) = `.
-///
-/// Anchoring on the result region matters: a quoted path may itself contain
-/// text that looks like a failed result.
-fn syscall_result(line: &str) -> Option<&str> {
-    let position = line.rfind(RESULT_MARKER)?;
-
-    Some(line[position + RESULT_MARKER.len()..].trim())
-}
-
-/// A syscall counts as successful only when strace printed a non-negative
-/// result for it. Failures (`-1 ERRNO`), restarts (`? ERESTARTSYS`) and lines
-/// carrying no result at all are all rejected.
-fn syscall_succeeded(line: &str) -> bool {
-    match syscall_result(line) {
-        Some(result) => !result.starts_with('-') && !result.starts_with('?'),
-        None => false,
-    }
-}
-
-/// Syscalls whose reported result proves the operation reached the kernel.
-fn observable_syscall(line: &str) -> bool {
-    syscall_succeeded(line) || connect_in_progress(line)
-}
-
-/// A non-blocking `connect()` reports `-1 EINPROGRESS`, and a repeated attempt
-/// on the same socket reports `-1 EALREADY`, while the connection is genuinely
-/// initiated toward the printed destination. Treating those as "did not
-/// happen" hides the destinations of every event-loop based client.
-fn connect_in_progress(line: &str) -> bool {
-    if !line.starts_with("connect(") {
-        return false;
-    }
-
-    let Some(result) = syscall_result(line) else {
-        return false;
-    };
-
-    let Some(errno) = result.strip_prefix("-1 ") else {
-        return false;
-    };
-
-    matches!(
-        errno.split_whitespace().next(),
-        Some("EINPROGRESS") | Some("EALREADY")
-    )
 }
 
 fn parse_behavior_line(
@@ -580,22 +495,23 @@ fn insert_file_behavior(
     // strings such as O_RDWR from impersonating access flags.
     let flags = file_open_flags(line);
 
-    // O_PATH opens a reference used only for name resolution. It grants
-    // neither read nor write access to the file contents, so recording it as
-    // a read would overstate what the command did.
+    // O_PATH yields a reference used only for name resolution. It grants
+    // neither read nor write access to the file contents, so recording a read
+    // would overstate what the command did.
     if flags_have_token(flags, "O_PATH") {
         return;
     }
 
-    // The access mode is a two-bit field printed as exactly one token, so a
-    // descriptor is readable unless it was opened write-only.
+    // The access mode is a two-bit field that strace prints as exactly one of
+    // O_RDONLY, O_WRONLY or O_RDWR, so a descriptor is readable unless it was
+    // opened write-only.
     let write_only = flags_have_token(flags, "O_WRONLY");
-    let read_write = flags_have_token(flags, "O_RDWR");
 
     // O_CREAT and O_TRUNC mutate the file even when the access mode itself is
-    // read-only, so they are write behavior in their own right.
+    // read-only, so they are write behavior in their own right. O_APPEND adds
+    // no mutation beyond the write access mode that must accompany it.
     let writable = write_only
-        || read_write
+        || flags_have_token(flags, "O_RDWR")
         || flags_have_token(flags, "O_CREAT")
         || flags_have_token(flags, "O_TRUNC");
 
@@ -610,31 +526,6 @@ fn insert_file_behavior(
     if writable {
         lock.insert_normalized(Behavior::FileWrite { path }, include_system, context);
     }
-}
-
-fn file_open_flags(line: &str) -> &str {
-    let Some(path_end) = quoted_end(line, 0) else {
-        return "";
-    };
-
-    let start = path_end + 1;
-    let end = line.rfind(") =").unwrap_or(line.len());
-
-    if start >= end {
-        return "";
-    }
-
-    &line[start..end]
-}
-
-/// Whole-token flag lookup inside a printed argument region.
-///
-/// Substring matching would find `O_RDWR` inside unrelated text, so the region
-/// is split on every character that cannot appear in a flag name.
-fn flags_have_token(flags: &str, wanted: &str) -> bool {
-    flags
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .any(|token| token == wanted)
 }
 
 fn renameat2_has_flag(line: &str, wanted: &str) -> bool {
@@ -753,228 +644,6 @@ fn first_fd_path(line: &str) -> Option<String> {
     angle_path(line)
 }
 
-fn angle_path(value: &str) -> Option<String> {
-    let start = value.find('<')? + 1;
-    let rest = &value[start..];
-    let end = rest.find('>')?;
-    Some(rest[..end].to_string())
-}
-
-fn first_quoted_string(line: &str) -> Option<String> {
-    nth_quoted_string(line, 0)
-}
-
-fn nth_quoted_string(line: &str, wanted: usize) -> Option<String> {
-    let mut in_quote = false;
-    let mut escaped = false;
-    let mut start = 0usize;
-    let mut index = 0usize;
-
-    for (pos, ch) in line.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        if ch == '\\' && in_quote {
-            escaped = true;
-            continue;
-        }
-
-        if ch == '"' {
-            if !in_quote {
-                start = pos + 1;
-                in_quote = true;
-            } else {
-                if index == wanted {
-                    return Some(decode_strace_string(&line[start..pos]));
-                }
-
-                index += 1;
-                in_quote = false;
-            }
-        }
-    }
-
-    None
-}
-
-fn decode_strace_string(raw: &str) -> String {
-    let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-
-    while index < bytes.len() {
-        if bytes[index] != b'\\' {
-            out.push(bytes[index]);
-            index += 1;
-            continue;
-        }
-
-        let escape_start = index;
-        index += 1;
-
-        if index >= bytes.len() {
-            out.push(b'\\');
-            break;
-        }
-
-        match bytes[index] {
-            b'\\' => {
-                out.push(b'\\');
-                index += 1;
-            }
-            b'"' => {
-                out.push(b'"');
-                index += 1;
-            }
-            b'\'' => {
-                out.push(b'\'');
-                index += 1;
-            }
-            b'a' => {
-                out.push(0x07);
-                index += 1;
-            }
-            b'b' => {
-                out.push(0x08);
-                index += 1;
-            }
-            b'f' => {
-                out.push(0x0c);
-                index += 1;
-            }
-            b'n' => {
-                out.push(b'\n');
-                index += 1;
-            }
-            b'r' => {
-                out.push(b'\r');
-                index += 1;
-            }
-            b't' => {
-                out.push(b'\t');
-                index += 1;
-            }
-            b'v' => {
-                out.push(0x0b);
-                index += 1;
-            }
-            b'x' => {
-                if index + 2 < bytes.len() {
-                    if let (Some(high), Some(low)) =
-                        (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-                    {
-                        out.push((high << 4) | low);
-                        index += 3;
-                        continue;
-                    }
-                }
-
-                out.extend_from_slice(&bytes[escape_start..=index]);
-                index += 1;
-            }
-            b'0'..=b'7' => {
-                let mut value = 0u16;
-                let mut digits = 0usize;
-
-                while index < bytes.len() && digits < 3 && matches!(bytes[index], b'0'..=b'7') {
-                    value = value * 8 + u16::from(bytes[index] - b'0');
-                    index += 1;
-                    digits += 1;
-                }
-
-                if value <= u16::from(u8::MAX) {
-                    out.push(value as u8);
-                } else {
-                    out.extend_from_slice(&bytes[escape_start..index]);
-                }
-            }
-            other => {
-                // Preserve unknown escapes instead of inventing semantics.
-                out.push(b'\\');
-                out.push(other);
-                index += 1;
-            }
-        }
-    }
-
-    match String::from_utf8(out) {
-        Ok(decoded) => decoded,
-        Err(_) => raw.to_string(),
-    }
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn quoted_end(line: &str, wanted: usize) -> Option<usize> {
-    let mut in_quote = false;
-    let mut escaped = false;
-    let mut index = 0usize;
-
-    for (pos, ch) in line.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-
-        if ch == '\\' && in_quote {
-            escaped = true;
-            continue;
-        }
-
-        if ch == '"' {
-            if !in_quote {
-                in_quote = true;
-            } else {
-                if index == wanted {
-                    return Some(pos);
-                }
-
-                index += 1;
-                in_quote = false;
-            }
-        }
-    }
-
-    None
-}
-
-fn extract_strace_quoted_field(line: &str, field: &str) -> Option<String> {
-    let start = line.find(field)? + field.len();
-    let rest = &line[start..];
-
-    // Preserve current scope: pathname Unix sockets are quoted directly.
-    // Abstract namespace sockets have a different strace representation
-    // and are handled by extract_strace_abstract_unix_address.
-    if !rest.starts_with('"') {
-        return None;
-    }
-
-    first_quoted_string(rest)
-}
-
-fn extract_strace_abstract_unix_address(line: &str) -> Option<String> {
-    let field = "sun_path=@";
-    let start = line.find(field)? + field.len();
-    let rest = &line[start..];
-
-    if !rest.starts_with('"') {
-        return None;
-    }
-
-    let name = first_quoted_string(rest)?;
-
-    Some(format!("@{name}"))
-}
-
 fn parse_connect(line: &str) -> Option<Behavior> {
     if let Some(address) = extract_strace_abstract_unix_address(line) {
         return Some(Behavior::UnixAbstractConnect { address });
@@ -993,4 +662,12 @@ fn parse_connect(line: &str) -> Option<Behavior> {
     }
 
     if let Some(port) = extract_between(line, "sin6_port=htons(", ")") {
-        if let Some(ip) = extract_between(line, "inet_pton(AF_INET6, \"", "\
+        if let Some(ip) = extract_between(line, "inet_pton(AF_INET6, \"", "\"") {
+            return Some(Behavior::NetworkConnect {
+                address: format!("[{ip}]:{port}"),
+            });
+        }
+    }
+
+    None
+}
