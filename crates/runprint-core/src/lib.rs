@@ -14,6 +14,7 @@ pub enum Behavior {
     FileWrite { path: String },
     FileDelete { path: String },
     FileRename { from: String, to: String },
+    RenameExchange { left: String, right: String },
     DirectoryCreate { path: String },
     DirectoryDelete { path: String },
     SymlinkCreate { target: String, link: String },
@@ -52,6 +53,7 @@ pub struct BehaviorCounts {
     pub file_write: usize,
     pub file_delete: usize,
     pub file_rename: usize,
+    pub rename_exchange: usize,
     pub directory_create: usize,
     pub directory_delete: usize,
     pub symlink_create: usize,
@@ -67,6 +69,7 @@ impl BehaviorCounts {
             + self.file_write
             + self.file_delete
             + self.file_rename
+            + self.rename_exchange
             + self.directory_create
             + self.directory_delete
             + self.symlink_create
@@ -109,6 +112,7 @@ impl BehaviorLock {
                 Behavior::FileWrite { .. } => counts.file_write += 1,
                 Behavior::FileDelete { .. } => counts.file_delete += 1,
                 Behavior::FileRename { .. } => counts.file_rename += 1,
+                Behavior::RenameExchange { .. } => counts.rename_exchange += 1,
                 Behavior::DirectoryCreate { .. } => counts.directory_create += 1,
                 Behavior::DirectoryDelete { .. } => counts.directory_delete += 1,
                 Behavior::SymlinkCreate { .. } => counts.symlink_create += 1,
@@ -178,6 +182,19 @@ pub fn normalize_behavior(
             from: normalize_runtime_path(&from, context),
             to: normalize_runtime_path(&to, context),
         }),
+
+        Behavior::RenameExchange { left, right } => {
+            let left = normalize_runtime_path(&left, context);
+            let right = normalize_runtime_path(&right, context);
+
+            let (left, right) = if left <= right {
+                (left, right)
+            } else {
+                (right, left)
+            };
+
+            Some(Behavior::RenameExchange { left, right })
+        }
 
         Behavior::DirectoryCreate { path } => Some(Behavior::DirectoryCreate {
             path: normalize_runtime_path(&path, context),
@@ -433,6 +450,22 @@ mod tests {
             normalize_behavior(behavior, false, &context()),
             Some(Behavior::FileWrite {
                 path: "$TMP/example.txt".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn exchange_paths_are_canonicalized() {
+        let behavior = Behavior::RenameExchange {
+            left: "/home/test/project/z.txt".into(),
+            right: "/home/test/project/a.txt".into(),
+        };
+
+        assert_eq!(
+            normalize_behavior(behavior, false, &context()),
+            Some(Behavior::RenameExchange {
+                left: "$PROJECT/a.txt".into(),
+                right: "$PROJECT/z.txt".into(),
             })
         );
     }

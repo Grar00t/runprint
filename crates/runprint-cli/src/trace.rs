@@ -322,14 +322,19 @@ fn parse_behavior_line(
             let dirfd = after[..comma].trim();
             let to = resolve_dirfd(dirfd, cwd, &to)?;
 
-            lock.insert_normalized(
-                Behavior::FileRename {
-                    from: from.to_string_lossy().into_owned(),
-                    to: to.to_string_lossy().into_owned(),
-                },
-                include_system,
-                context,
-            );
+            let from = from.to_string_lossy().into_owned();
+            let to = to.to_string_lossy().into_owned();
+
+            let behavior = if renameat2_has_flag(line, "RENAME_EXCHANGE") {
+                Behavior::RenameExchange {
+                    left: from,
+                    right: to,
+                }
+            } else {
+                Behavior::FileRename { from, to }
+            };
+
+            lock.insert_normalized(behavior, include_system, context);
         }
 
         return Ok(());
@@ -466,6 +471,29 @@ fn insert_file_behavior(
     };
 
     lock.insert_normalized(behavior, include_system, context);
+}
+
+fn renameat2_has_flag(line: &str, wanted: &str) -> bool {
+    if !line.starts_with("renameat2(") {
+        return false;
+    }
+
+    let Some(second_end) = quoted_end(line, 1) else {
+        return false;
+    };
+
+    let after = line[second_end + 1..].trim_start();
+
+    let Some(after) = after.strip_prefix(',') else {
+        return false;
+    };
+
+    let flags = after
+        .split_once(')')
+        .map(|(flags, _)| flags.trim())
+        .unwrap_or_else(|| after.trim());
+
+    flags.split('|').map(str::trim).any(|flag| flag == wanted)
 }
 
 fn resolve_openat(line: &str, cwd: &Path, raw: &str) -> Result<PathBuf> {
@@ -814,6 +842,57 @@ mod tests {
             nth_quoted_string(line, 0).as_deref(),
             Some(r"odd\qname.txt")
         );
+    }
+
+    #[test]
+    fn parses_renameat2_exchange() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"renameat2(AT_FDCWD</project>, "b.txt", AT_FDCWD</project>, "a.txt", RENAME_EXCHANGE) = 0"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(lock.behaviors.len(), 1);
+
+        assert!(lock.behaviors.contains(&Behavior::RenameExchange {
+            left: "$PROJECT/a.txt".to_string(),
+            right: "$PROJECT/b.txt".to_string(),
+        }));
+    }
+
+    #[test]
+    fn renameat2_path_named_exchange_is_not_exchange_without_flag() {
+        let context = NormalizeContext::new(PathBuf::from("/project"), None, PathBuf::from("/tmp"));
+
+        let mut lock = BehaviorLock::new();
+
+        parse_behavior_line(
+            r#"renameat2(AT_FDCWD</project>, "RENAME_EXCHANGE", AT_FDCWD</project>, "b.txt", 0) = 0"#,
+            Path::new("/project"),
+            &mut lock,
+            true,
+            &context,
+        )
+        .unwrap();
+
+        assert_eq!(lock.behaviors.len(), 1);
+
+        assert!(lock.behaviors.contains(&Behavior::FileRename {
+            from: "$PROJECT/RENAME_EXCHANGE".to_string(),
+            to: "$PROJECT/b.txt".to_string(),
+        }));
+
+        assert!(!lock
+            .behaviors
+            .iter()
+            .any(|behavior| matches!(behavior, Behavior::RenameExchange { .. })));
     }
 
     #[test]

@@ -119,6 +119,10 @@ fn explicitly_denied(policy: &GatePolicy, behavior: &Behavior) -> bool {
             matches_any(from, &policy.deny_rename) || matches_any(to, &policy.deny_rename)
         }
 
+        Behavior::RenameExchange { left, right } => {
+            matches_any(left, &policy.deny_rename) || matches_any(right, &policy.deny_rename)
+        }
+
         Behavior::DirectoryCreate { path } | Behavior::DirectoryDelete { path } => {
             matches_any(path, &policy.deny_directory)
         }
@@ -155,6 +159,12 @@ fn allows_new_behavior(policy: &GatePolicy, behavior: &Behavior) -> bool {
             policy.allow_new_renames
                 || (matches_any(from, &policy.allow_rename)
                     && matches_any(to, &policy.allow_rename))
+        }
+
+        Behavior::RenameExchange { left, right } => {
+            policy.allow_new_renames
+                || (matches_any(left, &policy.allow_rename)
+                    && matches_any(right, &policy.allow_rename))
         }
 
         Behavior::DirectoryCreate { path } | Behavior::DirectoryDelete { path } => {
@@ -258,6 +268,32 @@ mod tests {
 
         assert!(!result.allowed);
         assert_eq!(result.violations.len(), 1);
+    }
+
+    #[test]
+    fn exchange_requires_both_paths_in_rename_scope() {
+        let policy = GatePolicy {
+            allow_rename: vec!["$PROJECT/safe/**".into()],
+            ..GatePolicy::default()
+        };
+
+        let baseline = BehaviorLock::new();
+
+        let mut allowed = BehaviorLock::new();
+        allowed.insert(Behavior::RenameExchange {
+            left: "$PROJECT/safe/a.txt".into(),
+            right: "$PROJECT/safe/b.txt".into(),
+        });
+
+        assert!(evaluate_gate(&baseline, &allowed, &policy).allowed);
+
+        let mut denied = BehaviorLock::new();
+        denied.insert(Behavior::RenameExchange {
+            left: "$PROJECT/safe/a.txt".into(),
+            right: "$PROJECT/outside.txt".into(),
+        });
+
+        assert!(!evaluate_gate(&baseline, &denied, &policy).allowed);
     }
 
     #[test]

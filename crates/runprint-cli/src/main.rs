@@ -96,6 +96,7 @@ fn main() -> Result<()> {
             println!("file write {}", counts.file_write);
             println!("delete     {}", counts.file_delete);
             println!("rename     {}", counts.file_rename);
+            println!("exchange   {}", counts.rename_exchange);
             println!("mkdir      {}", counts.directory_create);
             println!("rmdir      {}", counts.directory_delete);
             println!("symlink    {}", counts.symlink_create);
@@ -304,6 +305,9 @@ fn render(item: &Behavior) -> String {
         Behavior::FileWrite { path } => format!("write    {path}"),
         Behavior::FileDelete { path } => format!("delete   {path}"),
         Behavior::FileRename { from, to } => format!("rename   {from} -> {to}"),
+        Behavior::RenameExchange { left, right } => {
+            format!("exchange {left} <-> {right}")
+        }
         Behavior::DirectoryCreate { path } => format!("mkdir    {path}"),
         Behavior::DirectoryDelete { path } => format!("rmdir    {path}"),
         Behavior::SymlinkCreate { target, link } => {
