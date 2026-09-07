@@ -208,6 +208,19 @@ fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bo
     let canonical = fs::canonicalize(&expanded)
         .with_context(|| format!("enforcement path does not exist: {}", expanded.display()))?;
 
+    if is_project_scoped(raw) {
+        let canonical_project_root =
+            fs::canonicalize(project_root).context("failed to canonicalize project root")?;
+
+        if !canonical.starts_with(&canonical_project_root) {
+            bail!(
+                "project-scoped enforcement path escapes project root: {} -> {}",
+                expanded.display(),
+                canonical.display()
+            );
+        }
+    }
+
     let metadata = fs::metadata(&canonical)?;
 
     if recursive {
@@ -222,6 +235,12 @@ fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bo
     }
 
     Ok((canonical, recursive))
+}
+
+fn is_project_scoped(raw: &str) -> bool {
+    raw == "$PROJECT"
+        || raw.starts_with("$PROJECT/")
+        || (!raw.starts_with('$') && !Path::new(raw).is_absolute())
 }
 
 fn expand_path(raw: &str, project_root: &Path) -> Result<PathBuf> {
@@ -283,6 +302,43 @@ mod tests {
     #[test]
     fn unknown_variable_is_rejected() {
         assert!(expand_path("$UNKNOWN/file", Path::new("/project")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_symlink_escape_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        symlink(outside.path(), project.path().join("escape")).unwrap();
+
+        let result = resolve_write_rule("$PROJECT/escape/**", project.path());
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("escapes project root"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_symlink_to_inside_is_allowed() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let inside = project.path().join("inside");
+
+        fs::create_dir(&inside).unwrap();
+        symlink(&inside, project.path().join("alias")).unwrap();
+
+        let (resolved, recursive) =
+            resolve_write_rule("$PROJECT/alias/**", project.path()).unwrap();
+
+        assert!(recursive);
+        assert_eq!(resolved, fs::canonicalize(&inside).unwrap());
     }
 
     #[test]
