@@ -29,8 +29,10 @@ Runprint currently records:
 - rename and `RENAME_EXCHANGE`
 - directory creation
 - symbolic and hard link creation
-- IPv4/IPv6 connections
+- successful IPv4/IPv6 `connect()` destinations
 - pathname and abstract Unix socket connections
+
+Runprint does not currently model `bind()`, `listen()`, or `accept()` as lockfile behaviors. Server-side socket activity is therefore outside the current behavior vocabulary.
 
 System-loader and locale noise is hidden by default. Use `--include-system` when those dependencies matter.
 
@@ -60,13 +62,13 @@ Example:
   "version": 1,
   "operation": "check",
   "verdict": "unchanged",
-  "command_exit": 10,
+  "command_exit": 0,
   "added": 0,
   "removed": 0
 }
 ```
 
-This disambiguates a child process exit code from a Runprint verdict that uses the same numeric process status.
+The status file separates the Runprint verdict from the child process exit code. For example, a child that exits `10` with unchanged runtime behavior still reports `"verdict": "unchanged"` and `"command_exit": 10`.
 
 ## Diff
 
@@ -119,8 +121,24 @@ version = 1
 allow_new_reads = true
 allow_exec = ["/usr/bin/git"]
 allow_write = ["$PROJECT/target/**"]
+allow_network = ["suffix::443"]
 deny_write = ["$HOME/.ssh/**"]
+deny_network = ["prefix:169.254.169.254:"]
 ```
+
+Gate policy matching is intentionally small and explicit:
+
+```text
+literal value        exact match
+exact:<value>        exact match
+prefix:<value>       string prefix match
+suffix:<value>       string suffix match
+/path/**             path itself and descendants only
+```
+
+Bare `*` is not a wildcard. Patterns such as `$PROJECT/dist*`, `127.0.0.1:*`, and `@name-*` do not match. Use `$PROJECT/dist/**`, `prefix:127.0.0.1:`, or `prefix:@name-` instead.
+
+For network destinations, `suffix::443` means any recorded IPv4/IPv6 destination ending in port `443`.
 
 Gate policy supports broad allow switches, scoped allowlists, and explicit denylists for reads, exec, writes, deletes, renames, directories, links, network, and Unix sockets.
 
@@ -164,6 +182,8 @@ Filesystem scopes support project-relative paths, `$PROJECT`, `$HOME`, `$TMP`, a
 
 Runprint requires Landlock enforcement to become fully active; it does not silently downgrade to unenforced execution.
 
+`gate` and `enforce` remain separate commands in the current release. `gate` observes and validates after execution; `enforce` prevents configured classes of behavior before execution.
+
 ## Normalization and determinism
 
 Machine-specific paths are normalized:
@@ -191,11 +211,15 @@ The underlying read, write, create, delete, and directory behavior remains in th
 
 The CI suite includes a warm `cargo test` regression that records the same workload twice and requires byte-identical lockfiles.
 
+The `digest` printed by `record` is a BLAKE3 digest of Runprint's compact serialized lock model. It is not a hash of the pretty-printed `behavior.lock` bytes and it is not a content hash of files touched by the observed command.
+
 ## Lockfile compatibility
 
 Current lockfile schema: `version 4`.
 
 The current reader accepts versions `1` through `4` and rejects unsupported future versions.
+
+Version `4` is the compatibility target. Additive optional fields should remain backward-compatible where possible instead of forcing a schema bump.
 
 ## Exit behavior
 
@@ -218,7 +242,11 @@ Linux only.
 
 Current observation backend: `strace`.
 
+Observation requires `strace`/ptrace access. Hardened containers, CI sandboxes, seccomp profiles, Yama settings, or other ptrace restrictions can prevent recording.
+
 Current enforcement backend: Landlock.
+
+Configured Landlock domains are fail-closed: Runprint requires the ruleset to report fully enforced state and does not silently continue when the requested restriction cannot be activated. Capability domains not configured in `[enforce]` remain unrestricted.
 
 An eBPF observation backend is deferred until the behavior model and normalization semantics are stable.
 

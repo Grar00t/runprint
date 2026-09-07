@@ -203,6 +203,18 @@ fn matches_any(value: &str, patterns: &[String]) -> bool {
 }
 
 fn pattern_matches(value: &str, pattern: &str) -> bool {
+    if let Some(exact) = pattern.strip_prefix("exact:") {
+        return value == exact;
+    }
+
+    if let Some(prefix) = pattern.strip_prefix("prefix:") {
+        return value.starts_with(prefix);
+    }
+
+    if let Some(suffix) = pattern.strip_prefix("suffix:") {
+        return value.ends_with(suffix);
+    }
+
     if let Some(prefix) = pattern.strip_suffix("/**") {
         return value == prefix
             || value
@@ -210,8 +222,8 @@ fn pattern_matches(value: &str, pattern: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with('/'));
     }
 
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        return value.starts_with(prefix);
+    if pattern.contains('*') {
+        return false;
     }
 
     value == pattern
@@ -224,17 +236,35 @@ mod tests {
     #[test]
     fn recursive_path_pattern_matches_children() {
         assert!(pattern_matches("$PROJECT/dist/app.js", "$PROJECT/dist/**"));
-
         assert!(pattern_matches("$PROJECT/dist", "$PROJECT/dist/**"));
-
         assert!(!pattern_matches("$PROJECT/src/app.js", "$PROJECT/dist/**"));
+        assert!(!pattern_matches("$PROJECT/disturbed/app.js", "$PROJECT/dist/**"));
     }
 
     #[test]
-    fn prefix_pattern_matches_network_port() {
-        assert!(pattern_matches("127.0.0.1:8080", "127.0.0.1:*"));
+    fn explicit_prefix_pattern_matches_network_host() {
+        assert!(pattern_matches(
+            "127.0.0.1:8080",
+            "prefix:127.0.0.1:"
+        ));
+        assert!(!pattern_matches(
+            "203.0.113.10:8080",
+            "prefix:127.0.0.1:"
+        ));
+    }
 
-        assert!(!pattern_matches("203.0.113.10:8080", "127.0.0.1:*"));
+    #[test]
+    fn explicit_suffix_pattern_matches_network_port() {
+        assert!(pattern_matches("127.0.0.1:443", "suffix::443"));
+        assert!(pattern_matches("[::1]:443", "suffix::443"));
+        assert!(!pattern_matches("127.0.0.1:8443", "suffix::443"));
+    }
+
+    #[test]
+    fn ambiguous_star_pattern_is_not_supported() {
+        assert!(!pattern_matches("$PROJECT/disturbed", "$PROJECT/dist*"));
+        assert!(!pattern_matches("127.0.0.1:443", "127.0.0.1:*"));
+        assert!(!pattern_matches("@runprint-test", "@runprint-*"));
     }
 
     #[test]
@@ -325,7 +355,7 @@ mod tests {
     #[test]
     fn scoped_abstract_unix_connect_is_allowed() {
         let policy = GatePolicy {
-            allow_unix: vec!["@runprint-*".into()],
+            allow_unix: vec!["prefix:@runprint-".into()],
             ..GatePolicy::default()
         };
 
@@ -361,7 +391,7 @@ mod tests {
     #[test]
     fn scoped_network_is_allowed() {
         let policy = GatePolicy {
-            allow_network: vec!["127.0.0.1:*".into()],
+            allow_network: vec!["prefix:127.0.0.1:".into()],
             ..GatePolicy::default()
         };
 
@@ -375,6 +405,28 @@ mod tests {
         let result = evaluate_gate(&baseline, &observed, &policy);
 
         assert!(result.allowed);
+    }
+
+    #[test]
+    fn any_host_on_port_is_allowed_with_explicit_suffix() {
+        let policy = GatePolicy {
+            allow_network: vec!["suffix::443".into()],
+            ..GatePolicy::default()
+        };
+
+        let baseline = BehaviorLock::new();
+
+        let mut ipv4 = BehaviorLock::new();
+        ipv4.insert(Behavior::NetworkConnect {
+            address: "203.0.113.10:443".into(),
+        });
+        assert!(evaluate_gate(&baseline, &ipv4, &policy).allowed);
+
+        let mut ipv6 = BehaviorLock::new();
+        ipv6.insert(Behavior::NetworkConnect {
+            address: "[2001:db8::10]:443".into(),
+        });
+        assert!(evaluate_gate(&baseline, &ipv6, &policy).allowed);
     }
 
     #[test]
@@ -409,7 +461,7 @@ mod tests {
 
         let policy = GatePolicy {
             allow_new_network: true,
-            deny_network: vec!["169.254.169.254:*".into()],
+            deny_network: vec!["prefix:169.254.169.254:".into()],
             ..GatePolicy::default()
         };
 
