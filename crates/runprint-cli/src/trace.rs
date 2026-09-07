@@ -322,6 +322,107 @@ fn parse_behavior_line(
         return Ok(());
     }
 
+    if line.starts_with("symlink(") {
+        if let (Some(target), Some(link)) = (nth_quoted_string(line, 0), nth_quoted_string(line, 1))
+        {
+            let link = resolve_path(cwd, &link).to_string_lossy().into_owned();
+
+            lock.insert_normalized(
+                Behavior::SymlinkCreate { target, link },
+                include_system,
+                context,
+            );
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("symlinkat(") {
+        if let (Some(target), Some(link)) = (nth_quoted_string(line, 0), nth_quoted_string(line, 1))
+        {
+            let first_end =
+                quoted_end(line, 0).ok_or_else(|| anyhow::anyhow!("malformed symlinkat target"))?;
+
+            let after = &line[first_end + 1..];
+            let after = after
+                .trim_start()
+                .strip_prefix(',')
+                .ok_or_else(|| anyhow::anyhow!("malformed symlinkat arguments"))?
+                .trim_start();
+
+            let comma = after
+                .find(',')
+                .ok_or_else(|| anyhow::anyhow!("missing symlinkat dirfd"))?;
+
+            let dirfd = after[..comma].trim();
+
+            let link = resolve_dirfd(dirfd, cwd, &link)?
+                .to_string_lossy()
+                .into_owned();
+
+            lock.insert_normalized(
+                Behavior::SymlinkCreate { target, link },
+                include_system,
+                context,
+            );
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("link(") {
+        if let (Some(from), Some(to)) = (nth_quoted_string(line, 0), nth_quoted_string(line, 1)) {
+            let from = resolve_path(cwd, &from).to_string_lossy().into_owned();
+            let to = resolve_path(cwd, &to).to_string_lossy().into_owned();
+
+            lock.insert_normalized(
+                Behavior::HardlinkCreate { from, to },
+                include_system,
+                context,
+            );
+        }
+
+        return Ok(());
+    }
+
+    if line.starts_with("linkat(") {
+        let from = nth_quoted_string(line, 0);
+        let to = nth_quoted_string(line, 1);
+
+        if let (Some(from), Some(to)) = (from, to) {
+            let from = resolve_openat(line, cwd, &from)?;
+
+            let first_end =
+                quoted_end(line, 0).ok_or_else(|| anyhow::anyhow!("malformed linkat source"))?;
+
+            let after = &line[first_end + 1..];
+            let after = after
+                .trim_start()
+                .strip_prefix(',')
+                .ok_or_else(|| anyhow::anyhow!("malformed linkat arguments"))?
+                .trim_start();
+
+            let comma = after
+                .find(',')
+                .ok_or_else(|| anyhow::anyhow!("missing linkat destination dirfd"))?;
+
+            let dirfd = after[..comma].trim();
+
+            let to = resolve_dirfd(dirfd, cwd, &to)?;
+
+            lock.insert_normalized(
+                Behavior::HardlinkCreate {
+                    from: from.to_string_lossy().into_owned(),
+                    to: to.to_string_lossy().into_owned(),
+                },
+                include_system,
+                context,
+            );
+        }
+
+        return Ok(());
+    }
+
     if line.starts_with("connect(") {
         if let Some(behavior) = parse_connect(line) {
             lock.insert_normalized(behavior, include_system, context);

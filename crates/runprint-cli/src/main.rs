@@ -69,6 +69,8 @@ fn main() -> Result<()> {
             println!("rename     {}", counts.file_rename);
             println!("mkdir      {}", counts.directory_create);
             println!("rmdir      {}", counts.directory_delete);
+            println!("symlink    {}", counts.symlink_create);
+            println!("hardlink   {}", counts.hardlink_create);
             println!("network    {}", counts.network);
             println!("unix       {}", counts.unix);
             println!("-----------");
@@ -160,6 +162,12 @@ fn render(item: &Behavior) -> String {
         Behavior::FileRename { from, to } => format!("rename   {from} -> {to}"),
         Behavior::DirectoryCreate { path } => format!("mkdir    {path}"),
         Behavior::DirectoryDelete { path } => format!("rmdir    {path}"),
+        Behavior::SymlinkCreate { target, link } => {
+            format!("symlink  {link} -> {target}")
+        }
+        Behavior::HardlinkCreate { from, to } => {
+            format!("hardlink {from} -> {to}")
+        }
         Behavior::NetworkConnect { address } => format!("connect  {address}"),
         Behavior::UnixConnect { path } => format!("ipc      {path}"),
     }

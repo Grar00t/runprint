@@ -14,6 +14,8 @@ pub enum Behavior {
     FileRename { from: String, to: String },
     DirectoryCreate { path: String },
     DirectoryDelete { path: String },
+    SymlinkCreate { target: String, link: String },
+    HardlinkCreate { from: String, to: String },
     NetworkConnect { address: String },
     UnixConnect { path: String },
 }
@@ -50,6 +52,8 @@ pub struct BehaviorCounts {
     pub file_rename: usize,
     pub directory_create: usize,
     pub directory_delete: usize,
+    pub symlink_create: usize,
+    pub hardlink_create: usize,
     pub network: usize,
     pub unix: usize,
 }
@@ -63,6 +67,8 @@ impl BehaviorCounts {
             + self.file_rename
             + self.directory_create
             + self.directory_delete
+            + self.symlink_create
+            + self.hardlink_create
             + self.network
             + self.unix
     }
@@ -103,6 +109,8 @@ impl BehaviorLock {
                 Behavior::FileRename { .. } => counts.file_rename += 1,
                 Behavior::DirectoryCreate { .. } => counts.directory_create += 1,
                 Behavior::DirectoryDelete { .. } => counts.directory_delete += 1,
+                Behavior::SymlinkCreate { .. } => counts.symlink_create += 1,
+                Behavior::HardlinkCreate { .. } => counts.hardlink_create += 1,
                 Behavior::NetworkConnect { .. } => counts.network += 1,
                 Behavior::UnixConnect { .. } => counts.unix += 1,
             }
@@ -175,6 +183,16 @@ pub fn normalize_behavior(
 
         Behavior::DirectoryDelete { path } => Some(Behavior::DirectoryDelete {
             path: normalize_runtime_path(&path, context),
+        }),
+
+        Behavior::SymlinkCreate { target, link } => Some(Behavior::SymlinkCreate {
+            target,
+            link: normalize_runtime_path(&link, context),
+        }),
+
+        Behavior::HardlinkCreate { from, to } => Some(Behavior::HardlinkCreate {
+            from: normalize_runtime_path(&from, context),
+            to: normalize_runtime_path(&to, context),
         }),
 
         Behavior::Exec { path } => Some(Behavior::Exec {
