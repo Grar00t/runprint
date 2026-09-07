@@ -764,8 +764,22 @@ fn quoted_end(line: &str, wanted: usize) -> Option<usize> {
     None
 }
 
+fn extract_strace_quoted_field(line: &str, field: &str) -> Option<String> {
+    let start = line.find(field)? + field.len();
+    let rest = &line[start..];
+
+    // Preserve current scope: pathname Unix sockets are quoted directly.
+    // Abstract namespace sockets have a different strace representation
+    // and are not handled here yet.
+    if !rest.starts_with('"') {
+        return None;
+    }
+
+    first_quoted_string(rest)
+}
+
 fn parse_connect(line: &str) -> Option<Behavior> {
-    if let Some(path) = extract_between(line, "sun_path=\"", "\"") {
+    if let Some(path) = extract_strace_quoted_field(line, "sun_path=") {
         return Some(Behavior::UnixConnect { path });
     }
 
@@ -841,6 +855,36 @@ mod tests {
         assert_eq!(
             nth_quoted_string(line, 0).as_deref(),
             Some(r"odd\qname.txt")
+        );
+    }
+
+    #[test]
+    fn decodes_unix_socket_path_escapes() {
+        let behavior = parse_connect(
+            r#"connect(4<UNIX-STREAM:[71608]>, {sa_family=AF_UNIX, sun_path="sock\\name"}, 12) = 0"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            behavior,
+            Behavior::UnixConnect {
+                path: "sock\\name".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_unix_socket_escaped_quote() {
+        let behavior = parse_connect(
+            r#"connect(4<UNIX-STREAM:[71608]>, {sa_family=AF_UNIX, sun_path="sock\"name"}, 12) = 0"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            behavior,
+            Behavior::UnixConnect {
+                path: "sock\"name".to_string(),
+            }
         );
     }
 
