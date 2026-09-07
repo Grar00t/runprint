@@ -143,6 +143,8 @@ fn main() -> Result<()> {
             println!("modify roots {}", config.enforce.modify.len());
             println!("create roots {}", config.enforce.create.len());
             println!("remove roots {}", config.enforce.remove.len());
+            println!("connect tcp  {}", config.enforce.connect_tcp.len());
+            println!("bind tcp     {}", config.enforce.bind_tcp.len());
 
             let exit_code = enforce::run(&command, &config.enforce)?;
 

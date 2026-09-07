@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use landlock::{
-    make_bitflags, AccessFs, BitFlags, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, RulesetStatus,
+    make_bitflags, AccessFs, AccessNet, BitFlags, CompatLevel, Compatible, NetPort, PathBeneath,
+    PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetStatus,
 };
 use serde::Deserialize;
 use std::{
@@ -27,6 +27,14 @@ pub struct EnforcePolicy {
 
     /// Permission to remove filesystem entries beneath a directory.
     pub remove: Vec<String>,
+
+    /// Allowed TCP destination ports.
+    /// Empty means TCP connect is not restricted by Runprint.
+    pub connect_tcp: Vec<u16>,
+
+    /// Allowed local TCP bind ports.
+    /// Empty means TCP bind is not restricted by Runprint.
+    pub bind_tcp: Vec<u16>,
 }
 
 pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
@@ -36,7 +44,7 @@ pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
 
     let project_root = env::current_dir().context("failed to determine current directory")?;
 
-    apply_filesystem_policy(policy, &project_root)?;
+    apply_policy(policy, &project_root)?;
 
     let status = Command::new(&command[0])
         .args(&command[1..])
@@ -46,11 +54,20 @@ pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
     Ok(status.code().unwrap_or(128))
 }
 
-fn apply_filesystem_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
-    let mut ruleset = Ruleset::default()
+fn apply_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
+    let mut builder = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(write_access())?
-        .create()?;
+        .handle_access(write_access())?;
+
+    if !policy.connect_tcp.is_empty() {
+        builder = builder.handle_access(AccessNet::ConnectTcp)?;
+    }
+
+    if !policy.bind_tcp.is_empty() {
+        builder = builder.handle_access(AccessNet::BindTcp)?;
+    }
+
+    let mut ruleset = builder.create()?;
 
     // Backward-compatible broad mutation roots.
     for pattern in &policy.write {
@@ -65,7 +82,7 @@ fn apply_filesystem_policy(policy: &EnforcePolicy, project_root: &Path) -> Resul
         ruleset = add_path_rule(ruleset, &path, access)?;
     }
 
-    // Narrow existing-file modification roots.
+    // Existing-file modification roots.
     for pattern in &policy.modify {
         let (path, _) = resolve_write_rule(pattern, project_root)?;
 
@@ -92,6 +109,16 @@ fn apply_filesystem_policy(policy: &EnforcePolicy, project_root: &Path) -> Resul
         }
 
         ruleset = add_path_rule(ruleset, &path, remove_access())?;
+    }
+
+    // TCP destination-port allowlist.
+    for port in &policy.connect_tcp {
+        ruleset = ruleset.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
+    }
+
+    // Local TCP bind-port allowlist.
+    for port in &policy.bind_tcp {
+        ruleset = ruleset.add_rule(NetPort::new(*port, AccessNet::BindTcp))?;
     }
 
     let status = ruleset.restrict_self()?;
@@ -140,7 +167,10 @@ fn write_access() -> BitFlags<AccessFs> {
 }
 
 fn file_write_access() -> BitFlags<AccessFs> {
-    make_bitflags!(AccessFs::{WriteFile | Truncate})
+    make_bitflags!(AccessFs::{
+        WriteFile
+        | Truncate
+    })
 }
 
 fn create_access() -> BitFlags<AccessFs> {
@@ -156,7 +186,10 @@ fn create_access() -> BitFlags<AccessFs> {
 }
 
 fn remove_access() -> BitFlags<AccessFs> {
-    make_bitflags!(AccessFs::{RemoveDir | RemoveFile})
+    make_bitflags!(AccessFs::{
+        RemoveDir
+        | RemoveFile
+    })
 }
 
 fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bool)> {
@@ -171,6 +204,7 @@ fn resolve_write_rule(pattern: &str, project_root: &Path) -> Result<(PathBuf, bo
     }
 
     let expanded = expand_path(raw, project_root)?;
+
     let canonical = fs::canonicalize(&expanded)
         .with_context(|| format!("enforcement path does not exist: {}", expanded.display()))?;
 
@@ -241,7 +275,7 @@ mod tests {
     #[test]
     fn project_prefix_expands() {
         assert_eq!(
-            expand_path("$PROJECT/dist", Path::new("/home/test/project")).unwrap(),
+            expand_path("$PROJECT/dist", Path::new("/home/test/project"),).unwrap(),
             PathBuf::from("/home/test/project/dist")
         );
     }
@@ -249,5 +283,20 @@ mod tests {
     #[test]
     fn unknown_variable_is_rejected() {
         assert!(expand_path("$UNKNOWN/file", Path::new("/project")).is_err());
+    }
+
+    #[test]
+    fn network_ports_parse_from_policy() {
+        let policy: EnforcePolicy = toml::from_str(
+            r#"
+connect_tcp = [443, 5432]
+bind_tcp = [3000]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(policy.connect_tcp, vec![443, 5432]);
+
+        assert_eq!(policy.bind_tcp, vec![3000]);
     }
 }

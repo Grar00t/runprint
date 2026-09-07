@@ -38,6 +38,9 @@ jobs:
       - name: Landlock filesystem capability matrix
         run: bash tests/landlock_fs_matrix.sh ./target/release/runprint
 
+      - name: Landlock TCP capability matrix
+        run: bash tests/landlock_net_matrix.sh ./target/release/runprint
+
       - name: Determinism smoke test
         run: |
           ./target/release/runprint record --output behavior.lock -- /bin/echo hello
