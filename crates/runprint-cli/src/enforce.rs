@@ -55,16 +55,35 @@ pub fn run(command: &[String], policy: &EnforcePolicy) -> Result<i32> {
     Ok(shell_exit_code(&status))
 }
 
-fn apply_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
-    let mut builder = Ruleset::default()
-        .set_compatibility(CompatLevel::HardRequirement)
-        .handle_access(write_access())?;
+fn has_filesystem_policy(policy: &EnforcePolicy) -> bool {
+    !policy.write.is_empty()
+        || !policy.modify.is_empty()
+        || !policy.create.is_empty()
+        || !policy.remove.is_empty()
+}
 
-    if !policy.connect_tcp.is_empty() {
+fn apply_policy(policy: &EnforcePolicy, project_root: &Path) -> Result<()> {
+    let filesystem = has_filesystem_policy(policy);
+    let connect_tcp = !policy.connect_tcp.is_empty();
+    let bind_tcp = !policy.bind_tcp.is_empty();
+
+    // An empty policy is intentionally a no-op. Capabilities that are not
+    // configured are not implicitly restricted.
+    if !filesystem && !connect_tcp && !bind_tcp {
+        return Ok(());
+    }
+
+    let mut builder = Ruleset::default().set_compatibility(CompatLevel::HardRequirement);
+
+    if filesystem {
+        builder = builder.handle_access(write_access())?;
+    }
+
+    if connect_tcp {
         builder = builder.handle_access(AccessNet::ConnectTcp)?;
     }
 
-    if !policy.bind_tcp.is_empty() {
+    if bind_tcp {
         builder = builder.handle_access(AccessNet::BindTcp)?;
     }
 
@@ -340,6 +359,39 @@ fn expand_prefix(raw: &str, token: &str, base: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filesystem_policy_activation_is_explicit() {
+        assert!(!has_filesystem_policy(&EnforcePolicy::default()));
+
+        let network_only = EnforcePolicy {
+            connect_tcp: vec![443],
+            ..EnforcePolicy::default()
+        };
+
+        assert!(!has_filesystem_policy(&network_only));
+
+        let filesystem_policies = [
+            EnforcePolicy {
+                write: vec!["$PROJECT/**".into()],
+                ..EnforcePolicy::default()
+            },
+            EnforcePolicy {
+                modify: vec!["$PROJECT/file".into()],
+                ..EnforcePolicy::default()
+            },
+            EnforcePolicy {
+                create: vec!["$PROJECT/**".into()],
+                ..EnforcePolicy::default()
+            },
+            EnforcePolicy {
+                remove: vec!["$PROJECT/**".into()],
+                ..EnforcePolicy::default()
+            },
+        ];
+
+        assert!(filesystem_policies.iter().all(has_filesystem_policy));
+    }
 
     #[test]
     fn project_prefix_expands() {

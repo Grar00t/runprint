@@ -195,6 +195,18 @@ expect_ok \
     /usr/bin/python3 -c \
     "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.bind(('127.0.0.1',$UNRESTRICTED_BIND)); s.listen(1); s.close()"
 
+# connect_tcp must not implicitly restrict filesystem mutation.
+
+rm -f connect-fs.txt
+
+expect_ok \
+    "connect_tcp: filesystem remains unrestricted" \
+    "$BIN" enforce -- \
+    /bin/sh -c 'printf "connect-fs\n" > connect-fs.txt'
+
+[ "$(cat connect-fs.txt)" = "connect-fs" ] || \
+    fail "connect_tcp filesystem write did not persist"
+
 # ============================================================
 # BIND_TCP
 # ============================================================
@@ -232,6 +244,18 @@ expect_ok \
     "$BIN" enforce -- \
     /usr/bin/python3 -c \
     "import socket; s=socket.create_connection(('127.0.0.1',$CONNECT_BLOCKED),2); s.close()"
+
+# bind_tcp must not implicitly restrict filesystem mutation.
+
+rm -f bind-fs.txt
+
+expect_ok \
+    "bind_tcp: filesystem remains unrestricted" \
+    "$BIN" enforce -- \
+    /bin/sh -c 'printf "bind-fs\n" > bind-fs.txt'
+
+[ "$(cat bind-fs.txt)" = "bind-fs" ] || \
+    fail "bind_tcp filesystem write did not persist"
 
 echo
 echo "PASS: Landlock TCP capability matrix"
