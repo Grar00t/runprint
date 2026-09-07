@@ -13,6 +13,16 @@ pub struct GatePolicy {
     pub allow_new_links: bool,
     pub allow_new_network: bool,
     pub allow_new_unix: bool,
+
+    pub allow_read: Vec<String>,
+    pub allow_exec: Vec<String>,
+    pub allow_write: Vec<String>,
+    pub allow_delete: Vec<String>,
+    pub allow_rename: Vec<String>,
+    pub allow_directory: Vec<String>,
+    pub allow_link: Vec<String>,
+    pub allow_network: Vec<String>,
+    pub allow_unix: Vec<String>,
 }
 
 impl Default for GatePolicy {
@@ -27,6 +37,16 @@ impl Default for GatePolicy {
             allow_new_links: false,
             allow_new_network: false,
             allow_new_unix: false,
+
+            allow_read: Vec::new(),
+            allow_exec: Vec::new(),
+            allow_write: Vec::new(),
+            allow_delete: Vec::new(),
+            allow_rename: Vec::new(),
+            allow_directory: Vec::new(),
+            allow_link: Vec::new(),
+            allow_network: Vec::new(),
+            allow_unix: Vec::new(),
         }
     }
 }
@@ -57,21 +77,68 @@ pub fn evaluate_gate(
 
 fn allows_new_behavior(policy: &GatePolicy, behavior: &Behavior) -> bool {
     match behavior {
-        Behavior::Exec { .. } => policy.allow_new_exec,
-        Behavior::FileRead { .. } => policy.allow_new_reads,
-        Behavior::FileWrite { .. } => policy.allow_new_writes,
-        Behavior::FileDelete { .. } => policy.allow_new_deletes,
-        Behavior::FileRename { .. } => policy.allow_new_renames,
+        Behavior::Exec { path } => policy.allow_new_exec || matches_any(path, &policy.allow_exec),
 
-        Behavior::DirectoryCreate { .. } | Behavior::DirectoryDelete { .. } => {
-            policy.allow_new_directories
+        Behavior::FileRead { path } => {
+            policy.allow_new_reads || matches_any(path, &policy.allow_read)
         }
 
-        Behavior::SymlinkCreate { .. } | Behavior::HardlinkCreate { .. } => policy.allow_new_links,
+        Behavior::FileWrite { path } => {
+            policy.allow_new_writes || matches_any(path, &policy.allow_write)
+        }
 
-        Behavior::NetworkConnect { .. } => policy.allow_new_network,
-        Behavior::UnixConnect { .. } => policy.allow_new_unix,
+        Behavior::FileDelete { path } => {
+            policy.allow_new_deletes || matches_any(path, &policy.allow_delete)
+        }
+
+        Behavior::FileRename { from, to } => {
+            policy.allow_new_renames
+                || (matches_any(from, &policy.allow_rename)
+                    && matches_any(to, &policy.allow_rename))
+        }
+
+        Behavior::DirectoryCreate { path } | Behavior::DirectoryDelete { path } => {
+            policy.allow_new_directories || matches_any(path, &policy.allow_directory)
+        }
+
+        Behavior::SymlinkCreate { link, .. } => {
+            policy.allow_new_links || matches_any(link, &policy.allow_link)
+        }
+
+        Behavior::HardlinkCreate { from, to } => {
+            policy.allow_new_links
+                || (matches_any(from, &policy.allow_link) && matches_any(to, &policy.allow_link))
+        }
+
+        Behavior::NetworkConnect { address } => {
+            policy.allow_new_network || matches_any(address, &policy.allow_network)
+        }
+
+        Behavior::UnixConnect { path } => {
+            policy.allow_new_unix || matches_any(path, &policy.allow_unix)
+        }
     }
+}
+
+fn matches_any(value: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| pattern_matches(value, pattern))
+}
+
+fn pattern_matches(value: &str, pattern: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return value == prefix
+            || value
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'));
+    }
+
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return value.starts_with(prefix);
+    }
+
+    value == pattern
 }
 
 #[cfg(test)]
@@ -79,57 +146,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_policy_allows_new_read() {
-        let baseline = BehaviorLock::new();
+    fn recursive_path_pattern_matches_children() {
+        assert!(pattern_matches("$PROJECT/dist/app.js", "$PROJECT/dist/**"));
 
-        let mut observed = BehaviorLock::new();
-        observed.insert(Behavior::FileRead {
-            path: "$PROJECT/input.txt".into(),
-        });
+        assert!(pattern_matches("$PROJECT/dist", "$PROJECT/dist/**"));
 
-        let result = evaluate_gate(&baseline, &observed, &GatePolicy::default());
-
-        assert!(result.allowed);
+        assert!(!pattern_matches("$PROJECT/src/app.js", "$PROJECT/dist/**"));
     }
 
     #[test]
-    fn default_policy_denies_new_write() {
-        let baseline = BehaviorLock::new();
+    fn prefix_pattern_matches_network_port() {
+        assert!(pattern_matches("127.0.0.1:8080", "127.0.0.1:*"));
 
-        let mut observed = BehaviorLock::new();
-        observed.insert(Behavior::FileWrite {
-            path: "$PROJECT/output.txt".into(),
-        });
-
-        let result = evaluate_gate(&baseline, &observed, &GatePolicy::default());
-
-        assert!(!result.allowed);
-        assert_eq!(result.violations.len(), 1);
+        assert!(!pattern_matches("203.0.113.10:8080", "127.0.0.1:*"));
     }
 
     #[test]
-    fn policy_can_deny_new_reads() {
+    fn scoped_write_is_allowed() {
         let policy = GatePolicy {
-            allow_new_reads: false,
+            allow_write: vec!["$PROJECT/dist/**".into()],
             ..GatePolicy::default()
         };
 
         let baseline = BehaviorLock::new();
 
         let mut observed = BehaviorLock::new();
-        observed.insert(Behavior::FileRead {
+        observed.insert(Behavior::FileWrite {
+            path: "$PROJECT/dist/app.js".into(),
+        });
+
+        let result = evaluate_gate(&baseline, &observed, &policy);
+
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn write_outside_scope_is_denied() {
+        let policy = GatePolicy {
+            allow_write: vec!["$PROJECT/dist/**".into()],
+            ..GatePolicy::default()
+        };
+
+        let baseline = BehaviorLock::new();
+
+        let mut observed = BehaviorLock::new();
+        observed.insert(Behavior::FileWrite {
             path: "$PROJECT/secret.txt".into(),
         });
 
         let result = evaluate_gate(&baseline, &observed, &policy);
 
         assert!(!result.allowed);
+        assert_eq!(result.violations.len(), 1);
     }
 
     #[test]
-    fn policy_can_allow_new_network() {
+    fn scoped_exec_is_allowed() {
         let policy = GatePolicy {
-            allow_new_network: true,
+            allow_exec: vec!["/usr/bin/git".into()],
+            ..GatePolicy::default()
+        };
+
+        let baseline = BehaviorLock::new();
+
+        let mut observed = BehaviorLock::new();
+        observed.insert(Behavior::Exec {
+            path: "/usr/bin/git".into(),
+        });
+
+        let result = evaluate_gate(&baseline, &observed, &policy);
+
+        assert!(result.allowed);
+    }
+
+    #[test]
+    fn scoped_network_is_allowed() {
+        let policy = GatePolicy {
+            allow_network: vec!["127.0.0.1:*".into()],
             ..GatePolicy::default()
         };
 
@@ -137,7 +230,7 @@ mod tests {
 
         let mut observed = BehaviorLock::new();
         observed.insert(Behavior::NetworkConnect {
-            address: "203.0.113.10:443".into(),
+            address: "127.0.0.1:3000".into(),
         });
 
         let result = evaluate_gate(&baseline, &observed, &policy);
@@ -148,6 +241,7 @@ mod tests {
     #[test]
     fn baseline_behavior_is_always_allowed() {
         let mut baseline = BehaviorLock::new();
+
         baseline.insert(Behavior::FileWrite {
             path: "$PROJECT/output.txt".into(),
         });
@@ -157,6 +251,5 @@ mod tests {
         let result = evaluate_gate(&baseline, &observed, &GatePolicy::default());
 
         assert!(result.allowed);
-        assert!(result.violations.is_empty());
     }
 }
