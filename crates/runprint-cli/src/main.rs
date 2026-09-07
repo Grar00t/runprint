@@ -9,7 +9,7 @@ use runprint_core::{
     gate::{evaluate_gate, GatePolicy},
     Behavior, BehaviorLock,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -47,6 +47,9 @@ enum Commands {
         #[arg(long)]
         include_system: bool,
 
+        #[arg(long)]
+        status_file: Option<PathBuf>,
+
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
@@ -69,9 +72,42 @@ enum Commands {
         #[arg(long)]
         include_system: bool,
 
+        #[arg(long)]
+        status_file: Option<PathBuf>,
+
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct StatusReport {
+    version: u32,
+    operation: &'static str,
+    verdict: &'static str,
+    command_exit: i32,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    added: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<usize>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    violations: Option<usize>,
+}
+
+fn write_status(path: Option<&Path>, report: &StatusReport) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+
+    let mut json = serde_json::to_string_pretty(report)?;
+    json.push('\n');
+
+    fs::write(path, json)?;
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -161,12 +197,26 @@ fn main() -> Result<()> {
             baseline,
             config,
             include_system,
+            status_file,
             command,
         } => {
             let baseline = load(&baseline)?;
             let policy = load_gate_policy(config.as_deref())?;
             let run = trace::record(&command, include_system)?;
             let result = evaluate_gate(&baseline, &run.lock, &policy);
+
+            write_status(
+                status_file.as_deref(),
+                &StatusReport {
+                    version: 1,
+                    operation: "gate",
+                    verdict: if result.allowed { "allow" } else { "deny" },
+                    command_exit: run.exit_code,
+                    added: None,
+                    removed: None,
+                    violations: Some(result.violations.len()),
+                },
+            )?;
 
             println!();
             println!("Runprint Gate");
@@ -200,13 +250,28 @@ fn main() -> Result<()> {
         Commands::Check {
             baseline,
             include_system,
+            status_file,
             command,
         } => {
             let expected = load(&baseline)?;
             let run = trace::record(&command, include_system)?;
             let d = diff(&expected, &run.lock);
+            let changed = !d.added.is_empty() || !d.removed.is_empty();
 
-            if d.added.is_empty() && d.removed.is_empty() {
+            write_status(
+                status_file.as_deref(),
+                &StatusReport {
+                    version: 1,
+                    operation: "check",
+                    verdict: if changed { "changed" } else { "unchanged" },
+                    command_exit: run.exit_code,
+                    added: Some(d.added.len()),
+                    removed: Some(d.removed.len()),
+                    violations: None,
+                },
+            )?;
+
+            if !changed {
                 println!();
                 println!("runtime behavior unchanged");
 

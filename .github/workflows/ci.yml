@@ -35,6 +35,9 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Exit verdict matrix
+        run: bash tests/exit_status_matrix.sh ./target/release/runprint
+
       - name: Landlock filesystem capability matrix
         run: bash tests/landlock_fs_matrix.sh ./target/release/runprint
 
