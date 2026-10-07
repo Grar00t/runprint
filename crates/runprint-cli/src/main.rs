@@ -456,10 +456,12 @@ mod config_tests {
 
         assert_eq!(fs::read_to_string(&target).unwrap(), "sentinel");
         assert_eq!(fs::read_to_string(&output).unwrap(), "replacement");
-        assert!(fs::symlink_metadata(&output)
-            .unwrap()
-            .file_type()
-            .is_file());
+        assert!(
+            fs::symlink_metadata(&output)
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
     }
 
     #[test]
