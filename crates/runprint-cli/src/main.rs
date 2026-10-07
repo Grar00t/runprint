@@ -12,6 +12,7 @@ use runprint_core::{
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -105,9 +106,7 @@ fn write_status(path: Option<&Path>, report: &StatusReport) -> Result<()> {
     let mut json = serde_json::to_string_pretty(report)?;
     json.push('\n');
 
-    fs::write(path, json)?;
-
-    Ok(())
+    atomic_write(path, json.as_bytes())
 }
 
 fn main() -> Result<()> {
@@ -354,9 +353,23 @@ fn load_config(explicit: Option<&Path>) -> Result<RunprintConfig> {
     Ok(config)
 }
 
-fn save(path: &Path, lock: &BehaviorLock) -> Result<()> {
-    fs::write(path, lock.canonical_json()?)?;
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.as_file_mut().sync_all()?;
+    temp.persist(path)?;
+
     Ok(())
+}
+
+fn save(path: &Path, lock: &BehaviorLock) -> Result<()> {
+    let json = lock.canonical_json()?;
+    atomic_write(path, json.as_bytes())
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,6 +439,25 @@ fn render(item: &Behavior) -> String {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_replaces_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        let output = dir.path().join("behavior.lock");
+
+        fs::write(&target, "sentinel").unwrap();
+        symlink(&target, &output).unwrap();
+
+        atomic_write(&output, b"replacement").unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "sentinel");
+        assert_eq!(fs::read_to_string(&output).unwrap(), "replacement");
+        assert!(fs::symlink_metadata(&output).unwrap().file_type().is_file());
+    }
 
     #[test]
     fn lock_loader_accepts_legacy_v1() {

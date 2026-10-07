@@ -20,6 +20,9 @@ runprint record -- npm test
 ```
 
 The default output is `behavior.lock`. Use `--output PATH` to write another file.
+Lockfile and status-file writes are staged in the destination directory and
+atomically renamed into place. A final-path symbolic link is replaced rather
+than followed, so writing an output does not truncate the symlink target.
 
 Runprint currently records:
 
