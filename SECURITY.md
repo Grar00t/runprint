@@ -13,6 +13,7 @@ Runprint records and compares runtime behavior and can optionally apply selected
 - Configured Landlock domains fail closed if Runprint cannot activate the requested restrictions fully.
 - Capability domains omitted from `[enforce]` remain unrestricted.
 - A lockfile describes observed behavior; it is not a cryptographic attestation that the child process or host is trustworthy.
+- Generated lockfiles and status files are committed with same-directory atomic rename; final-path symlinks are replaced instead of followed.
 
 ## Sensitive data
 
